@@ -12,6 +12,8 @@ from pathlib import Path
 
 import httpx
 
+from app import locales
+
 logger = logging.getLogger(__name__)
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -28,20 +30,33 @@ class UploadError(RuntimeError):
     """The upload did not happen; the Clip is still on disk."""
 
 
-def configured() -> bool:
+def _env(name: str, locale: str = locales.DEFAULT, default: str = "") -> str:
+    """One YouTube setting for one Locale.
+
+    Each Locale publishes to its own channel (docs/adr/0008), so every
+    credential is looked up under that Locale's prefix: YOUTUBE_ for Thai,
+    YOUTUBE_EN_ for English. There is no shared fallback on purpose — an
+    English clip that silently borrowed the Thai channel's refresh token would
+    publish to the wrong audience, and nothing about the upload would say so.
+    """
+    return os.environ.get(locales.get(locale)["youtube_prefix"] + name, default)
+
+
+def configured(locale: str = locales.DEFAULT) -> bool:
     return all(
-        os.environ.get(name)
-        for name in ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN")
+        _env(name, locale)
+        for name in ("CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN")
     )
 
 
-async def _access_token(client: httpx.AsyncClient) -> str:
+async def _access_token(client: httpx.AsyncClient,
+                        locale: str = locales.DEFAULT) -> str:
     reply = await client.post(
         TOKEN_URL,
         data={
-            "client_id": os.environ["YOUTUBE_CLIENT_ID"],
-            "client_secret": os.environ["YOUTUBE_CLIENT_SECRET"],
-            "refresh_token": os.environ["YOUTUBE_REFRESH_TOKEN"],
+            "client_id": _env("CLIENT_ID", locale),
+            "client_secret": _env("CLIENT_SECRET", locale),
+            "refresh_token": _env("REFRESH_TOKEN", locale),
             "grant_type": "refresh_token",
         },
     )
@@ -52,7 +67,8 @@ async def _access_token(client: httpx.AsyncClient) -> str:
     return reply.json()["access_token"]
 
 
-async def set_thumbnail(video_id: str, image: Path) -> None:
+async def set_thumbnail(video_id: str, image: Path,
+                        locale: str = locales.DEFAULT) -> None:
     """Use `image` as the video's thumbnail.
 
     Custom thumbnails need a phone-verified channel; without that YouTube
@@ -61,7 +77,7 @@ async def set_thumbnail(video_id: str, image: Path) -> None:
     it without treating the clip as lost.
     """
     async with httpx.AsyncClient(timeout=120) as client:
-        token = await _access_token(client)
+        token = await _access_token(client, locale)
         reply = await client.post(
             THUMBNAIL_URL,
             params={"videoId": video_id},
@@ -76,23 +92,25 @@ async def set_thumbnail(video_id: str, image: Path) -> None:
     logger.info("ตั้งปกให้ %s แล้ว", video_id)
 
 
-async def add_captions(video_id: str, srt: Path, language: str = "th") -> None:
+async def add_captions(video_id: str, srt: Path,
+                       locale: str = locales.DEFAULT) -> None:
     """Attach a subtitle track.
 
     Unlike the video upload this is a single multipart request, not the
     resumable flow: one JSON part for the snippet and one part for the SRT.
     Needs the `youtube.force-ssl` scope.
     """
+    spec = locales.get(locale)
     snippet = {
         "snippet": {
             "videoId": video_id,
-            "language": language,
-            "name": "ไทย",
+            "language": spec["captions"],
+            "name": spec["label"],
             "isDraft": False,
         }
     }
     async with httpx.AsyncClient(timeout=120) as client:
-        token = await _access_token(client)
+        token = await _access_token(client, locale)
         reply = await client.post(
             CAPTIONS_URL,
             params={"part": "snippet", "uploadType": "multipart"},
@@ -107,7 +125,7 @@ async def add_captions(video_id: str, srt: Path, language: str = "th") -> None:
     logger.info("ใส่ซับให้ %s แล้ว", video_id)
 
 
-def metadata(script: dict) -> dict:
+def metadata(script: dict, locale: str = locales.DEFAULT) -> dict:
     tags = [tag.lstrip("#") for tag in script.get("hashtags", [])]
     description = script.get("description", "")
     if tags:
@@ -117,28 +135,32 @@ def metadata(script: dict) -> dict:
             "title": script["title"][:MAX_TITLE],
             "description": description[:MAX_DESCRIPTION],
             "tags": tags,
-            "categoryId": os.environ.get("YOUTUBE_CATEGORY_ID", "28"),
+            "categoryId": _env("CATEGORY_ID", locale) or "28",
         },
         "status": {
-            "privacyStatus": os.environ.get("YOUTUBE_PRIVACY", "public"),
+            "privacyStatus": _env("PRIVACY", locale) or "public",
             "selfDeclaredMadeForKids": False,
         },
     }
 
 
-async def upload(clip: Path, script: dict) -> tuple[str, str]:
+async def upload(clip: Path, script: dict,
+                 locale: str = locales.DEFAULT) -> tuple[str, str]:
     """Upload the Clip. Returns (video_id, the privacy status YouTube applied).
 
     The status is read back rather than assumed: a project that has not passed
     Google's API compliance audit has its uploads forced to `private`, and the
     only honest way to know is to look at what came back.
     """
-    if not configured():
-        raise UploadError("ยังไม่ได้ตั้งค่า YouTube (รัน scripts/youtube_auth.py ก่อน)")
+    if not configured(locale):
+        raise UploadError(
+            f"ยังไม่ได้ตั้งค่าช่อง YouTube ของภาษา{locales.get(locale)['label']} "
+            "(รัน scripts/youtube_auth.py ให้ช่องนั้นก่อน)"
+        )
 
     size = clip.stat().st_size
     async with httpx.AsyncClient(timeout=600) as client:
-        token = await _access_token(client)
+        token = await _access_token(client, locale)
         headers = {"Authorization": f"Bearer {token}"}
 
         start = await client.post(
@@ -150,7 +172,7 @@ async def upload(clip: Path, script: dict) -> tuple[str, str]:
                 "X-Upload-Content-Length": str(size),
                 "X-Upload-Content-Type": "video/mp4",
             },
-            content=json.dumps(metadata(script)),
+            content=json.dumps(metadata(script, locale)),
         )
         if start.status_code not in (200, 201):
             raise UploadError(f"เริ่มอัปโหลดไม่ได้ ({start.status_code}): {start.text[:300]}")

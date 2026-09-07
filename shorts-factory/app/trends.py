@@ -1,4 +1,4 @@
-"""What Thailand is paying attention to right now.
+"""What a Locale's country is paying attention to right now.
 
 Two sources, both free and both about demand rather than supply:
 
@@ -20,7 +20,7 @@ from xml.etree import ElementTree
 
 import httpx
 
-from app import youtube
+from app import locales, youtube
 
 logger = logging.getLogger(__name__)
 
@@ -72,20 +72,20 @@ def parse_rss(xml: str) -> list[dict]:
     return out[:MAX_SEARCHES]
 
 
-async def searches(client: httpx.AsyncClient) -> list[dict]:
-    reply = await client.get(RSS_URL, params={"geo": REGION})
+async def searches(client: httpx.AsyncClient, geo: str = REGION) -> list[dict]:
+    reply = await client.get(RSS_URL, params={"geo": geo})
     reply.raise_for_status()
     return parse_rss(reply.text)
 
 
-async def watching(client: httpx.AsyncClient) -> list[dict]:
+async def watching(client: httpx.AsyncClient, region: str = REGION) -> list[dict]:
     """The TH chart, minus the categories this bot has no business writing."""
     token = await youtube._access_token(client)
     reply = await client.get(
         POPULAR_URL,
         headers={"Authorization": f"Bearer {token}"},
         params={"part": "snippet,statistics", "chart": "mostPopular",
-                "regionCode": REGION, "maxResults": 30},
+                "regionCode": region, "maxResults": 30},
     )
     reply.raise_for_status()
     out = []
@@ -103,13 +103,17 @@ async def watching(client: httpx.AsyncClient) -> list[dict]:
     return out[:MAX_VIDEOS]
 
 
-async def collect() -> list[dict]:
-    """Both sources. A source that fails is skipped, never fatal."""
+async def collect(locale: str = locales.DEFAULT) -> list[dict]:
+    """Both sources for one Locale's country. A failing source is skipped."""
+    spec = locales.get(locale)
     rows: list[dict] = []
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        for name, source in (("google-trends", searches), ("youtube-th", watching)):
+        for name, source, where in (
+            ("google-trends", searches, spec["trends_geo"]),
+            (f"youtube-{spec['trends_region'].lower()}", watching, spec["trends_region"]),
+        ):
             try:
-                rows += await source(client)
+                rows += await source(client, where)
             except Exception:
                 logger.exception("ดึง trend จาก %s ไม่สำเร็จ", name)
     return rows

@@ -1199,3 +1199,89 @@ the deadline rather than a fixed count.
 
 Verified in the running container (`/tmp/verify` scratch copy, container
 untouched): `pytest tests/test_shorts_factory.py -q` → **129 passed**.
+
+## 2026-09-07 — English Locale, batch 1: a second audience, not a second bot
+
+New `app/locales.py` bundles everything that changes for a different
+audience — prompt language, TTS voice, on-screen line width, captions
+language, output subfolder, trends country, and (once batch 2 exists) the
+YouTube channel — behind `locales.get()`, which degrades an unknown or
+missing locale code to `th` so a Manifest written before Locales existed
+still loads. Environment is read at call time, not import, so tests can
+swap a voice without reloading the module.
+
+- English voice is `en-US-AndrewNeural` via `TTS_VOICE_EN`, added to
+  `secrets.manifest.yaml` as a literal; Thai keeps `th-TH-NiwatNeural`.
+  Measured on the container today: `en-US-AndrewNeural` emits
+  `SentenceBoundary` the same as the Thai voice does (3 cards in, 3
+  boundaries out), so English rides the same one-take narration, tighten,
+  and join pipeline as Thai — no separate code path was needed.
+- `/en <topic>` writes and renders an English clip; `/trends en` pulls
+  Google Trends US plus the YouTube US `mostPopular` chart and its number
+  buttons produce English clips the same way the Thai ones do. Every bot
+  message, button and error stays Thai regardless of the clip's language.
+- The `spoken`/`narration` split is mirrored rather than reused as-is: Thai
+  still forbids Latin in `spoken`, English now forbids Thai in it, and
+  `render._speakable()` joins words with a space for English (Thai has no
+  word boundaries to join on).
+- English line width is capped at 24 characters (target 18) and that cap is
+  **enforced**, not just suggested to the model — `script._too_wide()` reads
+  the Locale's `enforce_char_count` flag and rejects an oversized English
+  line outright, because at Waree-Bold size 92 a Latin character measures
+  about 50px against Thai's 21px, and the pixel floor alone would pass a
+  38-character Latin line and then draw it at the 40px minimum. Thai keeps
+  measuring pixels only; its 34-character figure stays prompt guidance, not
+  a check.
+- `experiment.py` keeps the same `hook` factor and the same two variant
+  names, but the clause text is written in the clip's own language
+  (`experiment.VARIANTS_EN` plus an English explore clause).
+- `main.RESULT_TOPIC` now also matches English result phrasings (beat,
+  defeated, final score, standings, who won, last night, …) in the same
+  regex Thai uses; a leading `!` still bypasses the check either way.
+- English files land in `/volume1/shorts/en` (`/output/en` inside the
+  container); Thai output is unchanged at `/output`. `app/backfill.py` now
+  walks with `rglob` instead of `glob` so it finds both folders, and reads
+  the locale back from the folder name.
+
+Deferred to batch 2, all still open: the second YouTube channel itself
+(`YOUTUBE_EN_*` env, vault `stacks.shorts_factory.youtube_en.*`, its own
+`scripts/youtube_auth.py` run with the consent screen `In production`),
+per-locale analytics/retention, per-locale Gate counting in
+`experiment.report()`, and a locale column on the dashboard. New:
+`docs/adr/0008` records why English needs its own channel rather than a
+`locale` field on a shared one.
+
+Being accurate about what was not guarded yet at the time of writing: at the
+end of the batch-1 session, `deliver()` showed the upload button whenever
+`youtube.configured()` was true, with no branch on the clip's locale —
+pressing it on an English clip would have published through the Thai
+channel's credentials. Nothing in the code stopped that. Only the bot's Thai
+`/help` text told the human that English clips had to be uploaded by hand
+from `/volume1/shorts/en` for now; there was no code-level guard, and this
+entry did not claim one existed. (See the addendum below — that gap has
+since been closed.)
+
+Also left alone on purpose: `storyboard.SHORTS_LAYOUT` still describes the
+9:16 layout's negative space as being "for Thai subtitles" — storyboards
+were not touched in this batch.
+
+No tests were run in this session; this was a documentation-only pass over
+already-implemented code.
+
+**Addendum — upload guard added:** the gap the documentation pass above
+flagged has since been closed. `youtube.py` now reads every setting —
+client credentials, category id, privacy, caption language — under the
+Locale's own env prefix (`YOUTUBE_` for Thai, `YOUTUBE_EN_` for English),
+with no shared fallback between them. `deliver()` gates the upload button
+on `youtube.configured(locale)` for the clip's own locale, so the button
+simply does not appear on an English clip until `YOUTUBE_EN_*` is
+provisioned. `do_upload()` carries the locale snapshotted at deliver time
+through upload, thumbnail and captions, and `add_captions` tags the caption
+track's language from the Locale instead of always writing `th`. History
+entries now carry a `locale` field per upload (older entries have none and
+read as Thai). Two tests hold the line:
+`test_an_english_clip_never_uploads_through_the_thai_channel` and
+`test_the_upload_uses_the_locale_the_clip_was_delivered_with`. The full
+suite passes 159 in the container. The second channel itself still does not
+exist — until it does, English clips are still copied by hand from
+`/volume1/shorts/en`.

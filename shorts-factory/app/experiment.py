@@ -32,7 +32,28 @@ VARIANTS = {
     ),
 }
 
+# Same factor and the same two levels for every Locale — the arms have to be
+# comparable within a Locale, not across them — but the clause itself has to
+# reach the model in the language it is writing.
+VARIANTS_EN = {
+    "shock_number": (
+        "For this clip the first card must open with **a number that stops "
+        "people** (time wasted, size grown, money lost). Never open with a "
+        "question."
+    ),
+    "question": (
+        "For this clip the first card must open with **a blunt question the "
+        "viewer already asks themselves**. Never open with a statistic."
+    ),
+}
+VARIANTS_BY_LOCALE = {"th": VARIANTS, "en": VARIANTS_EN}
+
 EXPLORE_RATE = 1 / 3
+EXPLORE_CLAUSE_EN = (
+    "This one is an experiment: go right outside the usual pattern "
+    "(a different structure, an angle never taken before, a rhythm unlike the "
+    "earlier clips). Stay on the topic given."
+)
 EXPLORE_CLAUSE = (
     "รอบนี้เป็นคลิปทดลอง: เขียนออกนอกแพตเทิร์นเดิมได้เต็มที่ "
     "(โครงสร้างแปลกไป มุมที่ยังไม่เคยเล่า จังหวะที่ไม่เหมือนคลิปก่อนๆ) "
@@ -46,17 +67,20 @@ MIN_VIEWS = analytics.GATE_VIEWS_PER_VARIANT
 MIN_GAP = 5.0   # percentage points of averageViewPercentage
 
 
-def assign(roll: float | None = None, pick: str | None = None) -> dict:
+def assign(roll: float | None = None, pick: str | None = None,
+           locale: str = "th") -> dict:
     """Choose what this Clip is: an Explore clip, or one Variant of the factor.
 
     Returned as the fields a Manifest carries, so the caller writes them
     straight in and never has to know the shape.
     """
+    variants = VARIANTS_BY_LOCALE.get(locale, VARIANTS)
     roll = random.random() if roll is None else roll
     if roll < EXPLORE_RATE:
-        return {"variant": None, "explore": True, "style": EXPLORE_CLAUSE}
-    name = pick or random.choice(sorted(VARIANTS))
-    return {"variant": name, "explore": False, "style": VARIANTS[name]}
+        explore = EXPLORE_CLAUSE if locale == "th" else EXPLORE_CLAUSE_EN
+        return {"variant": None, "explore": True, "style": explore}
+    name = pick or random.choice(sorted(variants))
+    return {"variant": name, "explore": False, "style": variants[name]}
 
 
 def _percent(record: dict) -> float | None:

@@ -1,7 +1,8 @@
 # shorts-factory
 
-Telegram bot that turns a one-line topic into a 40-50 second vertical Thai
-DevOps/AI short.
+Telegram bot that turns a one-line topic into a 40-50 second vertical short.
+Thai by default; `/en` or a tap on a `/trends en` suggestion writes and
+renders the same clip in English instead — see [Locales](#locales).
 
 Send it a topic. It asks mimo for a script, shows you the script, and waits.
 Press **render** and it draws the cards, speaks them, assembles the clip, and
@@ -73,10 +74,11 @@ running A/B and whether it can be called yet), `/retention` (one clip's curve,
 with the drop-offs named by card), `/trends` (what Thailand is searching for
 and watching, turned into topics), `/storyboard` (a long-form storyboard from a
 one-line brief), `/say` (fix how a word is pronounced), `/redo` (render the
-last script again, unchanged). Anything that is not a command is a Topic —
-except text starting with `/`, which is answered as an unknown command rather
-than written about, because a typo used to cost minutes of model time and left
-a manifest named after it.
+last script again, unchanged), `/en <topic>` (write and render the same clip
+in English — see [Locales](#locales)). Anything that is not a command is a
+Topic — except text starting with `/`, which is answered as an unknown command
+rather than written about, because a typo used to cost minutes of model time
+and left a manifest named after it.
 
 A Topic that hinges on a result — who won, a score, what was announced — is
 turned away with an explanation rather than written. The model has no source
@@ -86,7 +88,74 @@ essay (small team, fast sets, tight defence, heart) and two reached YouTube
 carrying invented figures — "Thai sets are 0.3s faster", "China average 186cm
 against Thailand's 175". `/trends` has always dropped news and sport before
 suggesting anything; this is the same rule applied to what the human types.
-`!` in front of the topic overrides it, for when the human knows better.
+The same guard matches the same trap phrased in English — "beat", "final
+score", "who won", "last night" and the like — in one regex rather than one per
+Locale. `!` in front of the topic overrides it, for when the human knows
+better.
+
+## Locales
+
+A Locale is the whole bundle that changes when a Clip is written for a
+different audience, not just the words: which voice reads it, how many
+characters fit a line on the card, which country's trends feed `/trends`,
+where the finished file lands, and which YouTube channel it publishes to —
+the second channel's credentials are the only piece still to come. Moving
+one of those without the others produces a Clip that is
+wrong in a way nobody notices until it is on YouTube, so `app/locales.py`
+moves them together as one unit, keyed on a short code (`th`, `en`).
+
+An unknown or missing code degrades to Thai rather than raising, because a
+Manifest written before Locales existed carries no `locale` field at all —
+old clips keep working without a backfill.
+
+`/en <topic>` writes and renders the clip in English, spoken by
+`en-US-AndrewNeural`. `/trends en` pulls Google Trends US and the YouTube US
+`mostPopular` chart instead of the Thai ones, and the numbered buttons under
+that list produce English clips without typing `/en` yourself. A language
+code the bot doesn't know after `/trends` is refused rather than guessed at;
+bare `/trends` and `/trends th` are the same thing. All of the bot's own
+messages, buttons and errors stay in Thai regardless
+of which Locale the clip is in — only the Clip's own script, on-screen text,
+captions and voice change.
+
+Latin runs about 50px a character in Waree-Bold against Thai's 21px, so the
+same line width would either overflow or shrink an English card's font to the
+40px floor. English lines are capped at 24 characters (18 is the target given
+to the model), and unlike Thai the count is *enforced*: the renderer's pixel
+measurement alone would pass a 38-character Latin line and then draw it at the
+minimum size, so the Locale also holds the model to a hard character count and
+the renderer applies whichever cut — pixels or characters — is larger. Thai
+keeps the pixel measurement only; its 34-character guidance to the model has
+never been a hard limit.
+
+The `spoken` field — the transliteration the voice actually reads, separate
+from the `narration` shown as subtitles — mirrors the same rule the other way:
+Thai `spoken` may hold no Latin characters, English `spoken` may hold no Thai
+characters, because either voice mishandles the other script mid-sentence.
+edge-tts reports a `SentenceBoundary` for `en-US-AndrewNeural` just as it does
+for the Thai voice (3 cards in, 3 boundaries out, measured 2026-09-07), so
+English narration goes through the same one-take-then-trim pipeline described
+under [Pipeline](#pipeline) — no separate code path, just a different voice
+and a space rather than nothing joining the words.
+
+English files land in `/volume1/shorts/en` (`/output/en` inside the
+container), Thai clips keep landing straight in `/output` as before.
+`app/backfill.py` now walks `/output` with `rglob` instead of `glob` so it
+finds both, and reads a reconstructed clip's Locale off its folder name
+(`en` vs anything else).
+
+`/experiment`'s hook factor carries the same two Variant names in both
+Locales, but the clause text handed to the model is written in the clip's own
+language rather than translated, so an English clip is not visibly writing
+from a translated Thai instruction.
+
+**Not done yet (batch 2):** a second YouTube channel for English uploads
+(needs its own vault credentials and its own run of
+`scripts/youtube_auth.py`), per-Locale counting in `/experiment`'s Gate
+(today it pools every clip regardless of language), a Locale column on the
+dashboard, and retention/analytics split by channel. See
+[Uploading to YouTube](#uploading-to-youtube) for what that gap means for
+`/en` clips today.
 
 ## Pipeline
 
@@ -260,7 +329,9 @@ back from the newest published clip until it finds one with data.
 YouTube's own `mostPopular` chart for TH (what they watch) — and asks the model
 to turn them into five topics you could actually be given. The raw rows are
 sent too, so a suggestion that drifted from its source can be caught against
-it.
+it. `/trends en` reads the same two signals scoped to the US (Google Trends
+US, YouTube's `mostPopular` for US) and suggests English topics instead — see
+[Locales](#locales).
 
 The suggestions carry a numbered button each, so picking one is a tap rather
 than retyping a Thai sentence; typing a topic still works and is still the only
@@ -336,7 +407,10 @@ Variant. It names a winner only when both arms have 10 clips and 300 views and
 their medians differ by at least 5 percentage points; below that it says
 *inconclusive*, which is a result and not a failure. The discard rate is a
 signal in its own right — a Variant whose scripts you keep throwing away is
-losing, whatever its retention says.
+losing, whatever its retention says. English clips run the same factor with a
+clause written in English (see [Locales](#locales)), but `/experiment` still
+pools every clip's numbers regardless of Locale — splitting the Gate per
+Locale is not done yet.
 
 ## Uploading to YouTube
 
@@ -360,9 +434,26 @@ but does not count as a failed upload.
 
 With no credentials in the vault, the button simply never appears.
 
+There is no second channel yet, but the code now knows an English clip needs
+one: every YouTube setting — client credentials, category id, privacy,
+caption language — is read under the Locale's own env prefix (`YOUTUBE_` for
+Thai, `YOUTUBE_EN_` for English), with no shared fallback between them.
+Setting `YOUTUBE_EN_*` is exactly what makes the upload button appear on
+English clips; while it stays unset, `deliver()` never shows the button under
+an `/en` clip, and `youtube.upload()` refuses outright if it were called for
+that locale anyway. `do_upload()` uses the locale snapshotted at deliver
+time, so the button — once it exists — always uploads through the same
+channel the clip was written for. Category id and privacy are per-Locale
+too (`YOUTUBE_EN_CATEGORY_ID` / `YOUTUBE_EN_PRIVACY`, same defaults `28` and
+`public` as Thai). Until the second channel exists (batch 2, see
+[Locales](#locales)), `/en` clips are not uploaded from the bot at all — copy
+the file from `/volume1/shorts/en` and upload it by hand. `/help` tells the
+human this in Thai.
+
 ## Subtitles, history and `/stats`
 
-Each upload gets a Thai caption track built from the same sentence boundaries
+Each upload gets a caption track tagged for the clip's own Locale — English
+gets `language: en`, Thai gets `th` — built from the same sentence boundaries
 the video is cut on, and the `.srt` is kept beside the mp4.
 
 Uploads are recorded in `/data/history.json`. Recent titles go into the prompt
@@ -397,6 +488,7 @@ make secrets                    # render .env from vault + manifest
 | `FLOW_PARK_HOURS` | `24` | how long a clip waits for footage you generate in Flow |
 | `FLOW_PROMPT_TIMEOUT_SECONDS` | `180` | cap on writing one Flow Prompt |
 | `STORYBOARD_TIMEOUT_SECONDS` | `300` | cap on planning one storyboard |
+| `TTS_VOICE_EN` | `en-US-AndrewNeural` | the English Locale's voice, used by `/en` and `/trends en` clips |
 
 The `/volume1/shorts` shared folder must exist on the NAS before first run;
 create it in DSM (Control Panel → Shared Folder), it is not created by the

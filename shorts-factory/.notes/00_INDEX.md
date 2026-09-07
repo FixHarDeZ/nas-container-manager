@@ -7,6 +7,21 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
 
 ## Shape
 
+- **Locale (2026-09-07).** `app/locales.py` bundles everything that moves
+  together for a different audience — prompt language, TTS voice, on-screen
+  line width, captions language, output subfolder, trends country, and the
+  YouTube channel (its env prefix; the second channel's credentials are still
+  outstanding) — behind `locales.get()`, which degrades an
+  unknown or missing `locale` code to `th` so a Manifest written before
+  Locales existed still loads. Environment is read at call time, not import.
+  `/en <topic>` writes and renders an English clip; `/trends en` pulls Google
+  Trends US plus the YouTube US chart and its number buttons produce English
+  clips. Bot messages, buttons and errors stay Thai regardless of the clip's
+  language. English files land in `/output/en` (`/volume1/shorts/en` on the
+  NAS); Thai output is unchanged at `/output`. `app/backfill.py` walks with
+  `rglob` instead of `glob` to reach both folders and reads the locale back
+  from the folder name. See `docs/adr/0008` for why English publishes to a
+  second channel instead of sharing the Thai one.
 - One container for the bot itself: no ports, no scheduler thread. A single
   Telegram `getUpdates` long-poll loop is its entire interface; the two
   recurring jobs (daily snapshots, `/trends` three times a day) ride that
@@ -23,6 +38,10 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   edge-tts reads. `validate()` rejects any Latin character in `spoken`, and
   `render._speakable()` strips hyphens/dashes before synthesis — the voice reads
   one as a ~1s pause ("เอฟ-35" became "เอฟ" … "35"), so model names are said whole.
+  **The rule is mirrored for English (2026-09-07):** Thai `spoken` still
+  forbids Latin, but an English clip's `spoken` forbids Thai instead, and
+  `render._speakable()` joins words with a space for English — Thai has no
+  word boundaries to join on, English does.
 - **Pronunciation overrides live in `/data/say.json`.** `validate()` cannot see
   that a word is said wrong: the model letter-spelled "TH-AI Passport" into
   `ทีเอไอพาสปอร์ต` (2026-08-31), and edge-tts mangles some correctly spelled
@@ -48,14 +67,26 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   and commonly answers prose instead of Script JSON. `make_script()` rejects
   URL-only input before claiming a Manifest/Variant and asks for a headline or
   topic. A topic plus an optional reference URL still goes through normally.
-- **Line length is checked in pixels, not characters.** `script._too_wide()`
+- **Line length is checked in pixels for Thai, but the character count is
+  enforced for English (2026-09-07 clarifies what changed).** `script._too_wide()`
   measures the line with Waree at `render.MIN_TEXT_SIZE` against 864px — the
   1080px frame less margins, which is the narrower of the two draw paths (text
-  over footage; the gradient card is 1210px wide). A character count is a bad
-  proxy for Thai: measured across 209 accepted lines the widest was 719px at 33
-  characters, and a 37-character line lost a whole Script on 2026-08-29.
+  over footage; the gradient card is 1210px wide). For Thai, that pixel
+  measurement is still the only gate: a character count is a bad proxy for
+  Thai, measured across 209 accepted lines the widest was 719px at 33
+  characters, and a 37-character line lost a whole Script on 2026-08-29, so
   `HARD_MAX_CHARS_PER_LINE = 34` survives only as prompt guidance (the model
   cannot measure pixels) and as the fallback where the font is unavailable.
+  English does not get that free pass: at full size (size 92) Waree-Bold
+  renders a Latin character at about 50px against Thai's 21px, so the same
+  pixel floor would pass a 38-character Latin line and draw it at the 40px
+  minimum — unreadable on a phone. The English Locale sets
+  `enforce_char_count: True`, and `_too_wide()` rejects any English line over
+  24 characters (target 18) regardless of what the pixel measurement says.
+  Keep these two figures attached to their own language: 719px/33 chars is
+  Thai's pixel measurement, 50px-vs-21px is the full-size per-character figure
+  behind English's hard character cap — they are not the same measurement and
+  do not merge into one number.
 - **Footage can come from the human.** 🎨 on a Script makes the bot write an
   English Flow Prompt for the Hook card and park the Clip in `state["parked"]`;
   the human generates it in the Google Flow app and replies to that message
@@ -155,6 +186,7 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
 | `TELEGRAM_BOT_TOKEN` | `stacks.shorts_factory.telegram.bot_token` | dedicated bot, not ops-bot's |
 | `TELEGRAM_CHAT_ID` | `stacks.shorts_factory.telegram.chat_id` | only trust boundary — all other senders dropped |
 | `TTS_VOICE` | literal | `th-TH-NiwatNeural` |
+| `TTS_VOICE_EN` | literal | `en-US-AndrewNeural`; English Locale's voice, added 2026-09-07 |
 | `PEXELS_API_KEY` | `stacks.shorts_factory.pexels_api_key` | free key; absent = every card falls back to the gradient |
 | `BGM_DIR` | literal `/output/bgm` | drop CC0 tracks in; empty or missing = no music |
 | `MIMO_REASONING_EFFORT` | literal `low` | mimo-v2.5-pro is a reasoning model; the default budget doubles latency for no better script |
@@ -230,3 +262,18 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   affects search, the channel page and suggestions.
 - The Google API-audit and OAuth-refresh-token claims behind ADR 0001 were
   never checked against Google's own docs. Confirm before building any upload.
+- **English Locale batch 2, still open (see `docs/adr/0008`):** the second
+  YouTube channel itself (`YOUTUBE_EN_*` env, vault
+  `stacks.shorts_factory.youtube_en.*`, its own `scripts/youtube_auth.py` run
+  with the consent screen `In production`), per-locale analytics/retention,
+  per-locale Gate counting in `experiment.report()` (today it counts every
+  clip toward one Gate regardless of language), and a locale column on the
+  dashboard. The upload-routing guard has since landed and is
+  credential-gated: `youtube.py` reads every setting under the Locale's own
+  env prefix with no shared fallback, `deliver()` only shows the button when
+  `youtube.configured(locale)` is true for that clip's locale, and
+  `add_captions` tags the track from the Locale — so until `YOUTUBE_EN_*` is
+  provisioned the button simply never appears on an English clip, and the
+  human still uploads it by hand from `/volume1/shorts/en`.
+  `storyboard.SHORTS_LAYOUT` also still describes its negative space as being
+  "for Thai subtitles" — left alone in this batch.

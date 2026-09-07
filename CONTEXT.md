@@ -42,6 +42,15 @@ is not part of an adapter — it stays local to each stack (good locality).
 
 Terms owned by the `shorts-factory` stack.
 
+**Locale**:
+The whole audience a Clip is made for, not just its words: the voice that
+reads it, how the on-screen text is judged to fit, where the trends feed comes
+from, where the finished file lands, and which channel it is eventually
+published to all belong to the same Locale and change together. Every term
+below can belong to more than one Locale; an unrecognised one is treated as
+the default rather than rejected.
+_Avoid_: language, market, region, lane
+
 **Topic**:
 A one-line subject the human sends to the bot, and the only input the pipeline
 takes.

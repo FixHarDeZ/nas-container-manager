@@ -35,8 +35,12 @@ def _save(record: dict) -> None:
         logger.exception("เขียน manifest ไม่ได้ (%s)", record.get("id"))
 
 
-def start(topic: str) -> str:
-    """Open a Manifest for a new Topic and return its id."""
+def start(topic: str, locale: str = "th") -> str:
+    """Open a Manifest for a new Topic and return its id.
+
+    `locale` is written on every record from here on. A Manifest older than
+    Locales has no such field, and every reader treats that absence as Thai.
+    """
     # Sharing a filename means the second Manifest silently erases the first,
     # which is the one failure this module exists to prevent. Milliseconds are
     # not enough on their own — the backfill opens Manifests in a tight loop
@@ -51,6 +55,7 @@ def start(topic: str) -> str:
         "id": clip_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "topic": topic,
+        "locale": locale,
         # Filled in once experiments start; recorded as null until then so a
         # pre-experiment Manifest is never mistaken for an unassigned one.
         "variant": None,

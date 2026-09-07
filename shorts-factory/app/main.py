@@ -17,7 +17,7 @@ from pathlib import Path
 
 import httpx
 
-from app import (analytics, backfill, experiment, history, manifest, render,
+from app import (analytics, backfill, experiment, history, locales, manifest, render,
                  retention, script as script_gen, snapshots, storyboard, trends,
                  youtube)
 
@@ -59,6 +59,13 @@ SUGGESTION_LIFETIME = timedelta(days=2)
 # in Flow takes minutes and the human may be away; a day is generous and still
 # short enough that a forgotten Clip does not block the next one forever.
 PARK_LIFETIME = timedelta(hours=int(os.environ.get("FLOW_PARK_HOURS", "24")))
+# Every Locale keeps its finished Clips in its own folder under /output, so
+# nobody has to guess from a filename which channel a file belongs to. Thai
+# stays exactly where it has always been.
+def output_dir(locale: str | None = None) -> Path:
+    return OUTPUT_DIR / locales.get(locale)["subdir"]
+
+
 # Human-generated Footage lives beside the clips on /volume1/shorts: it cost
 # Flow credits, and the workdir is wiped after every render.
 FOOTAGE_DIR = OUTPUT_DIR / "footage"
@@ -90,7 +97,7 @@ PARK_KEYBOARD = {
 
 HELP = """🎬 shorts-factory
 
-ส่งหัวข้อมาเฉยๆ = เริ่มทำคลิปใหม่
+ส่งหัวข้อมาเฉยๆ = เริ่มทำคลิปไทยใหม่
 ระหว่างรอรีวิวสคริปต์ พิมพ์บอกได้ว่าอยากแก้ตรงไหน (บอทเขียนใหม่ให้)
 🎬 render (Pexels) = ทำคลิปเลย · 🗑 ทิ้ง = เริ่มใหม่ · ⬆️ = อัปขึ้น YouTube (ต้องกดเอง)
 
@@ -125,6 +132,13 @@ HELP = """🎬 shorts-factory
 หัวข้อที่ต้องรู้ผลแข่ง/ผลประกาศ บอทจะไม่รับ (ไม่ได้ต่อเน็ต เขียนไปก็แต่งตัวเลขเอง)
    อยากให้ทำจริงๆ ใส่ ! นำหน้าหัวข้อ
 
+/en <หัวข้อ> — ทำคลิปภาษาอังกฤษสำหรับคนอเมริกา (ช่องคนละช่องกับไทย)
+   สคริปต์ ข้อความบนจอ ซับ และเสียงอ่านเป็นอังกฤษหมด (เสียง en-US-AndrewNeural)
+   ไฟล์ลงที่ /volume1/shorts/en แยกจากคลิปไทย
+   ตัวหนังสือละตินกว้างกว่าไทยเท่าตัว บรรทัดบนจอเลยสั้นกว่า (24 ตัวอักษร)
+   ยังอัปขึ้น YouTube จากบอทไม่ได้จนกว่าจะตั้งช่องที่สองเสร็จ — ตอนนี้เอาไฟล์ไปอัปเอง
+   ปุ่มทุกปุ่มและข้อความของบอทยังเป็นไทยเหมือนเดิม
+
 /redo — render คลิปล่าสุดซ้ำ ด้วยสคริปต์เดิมเป๊ะ ไม่ต้องรอเขียนใหม่
    ใช้ตอนแก้เสียงอ่านด้วย /say แล้วอยากได้ไฟล์ใหม่ (เพลงประกอบสุ่มใหม่ด้วย)
    คลิปที่อัป YouTube ไปแล้วไม่ถูกแทนที่ ต้องอัปใหม่เอง
@@ -144,6 +158,9 @@ HELP = """🎬 shorts-factory
    ส่งกราฟมาให้ พร้อมบอกว่าวินาทีที่คนหนีเยอะสุดคือ card ไหน พูดอะไรอยู่
    ใส่ id ต่อท้ายได้ เช่น /retention abc123 — ไม่ใส่ = ไล่หาคลิปล่าสุดที่มีข้อมูล
    YouTube ทำกราฟนี้ให้เฉพาะคลิปที่มีคนดูมากพอ (วัดแล้ว: 361 views มี, 27 views ไม่มี)
+
+/trends en — ของฝั่งอเมริกา (Google Trends US + ชาร์ต YouTube US) เสนอหัวข้ออังกฤษ
+   กดปุ่มเลขจากลิสต์นี้ = ได้คลิปอังกฤษ ไม่ต้องพิมพ์ /en เอง
 
 /trends — ตอนนี้คนไทยค้นอะไร ดูอะไรกันอยู่
    ดึงจาก Google Trends (ประเทศไทย) + ชาร์ตคลิปฮิตของ YouTube ไทย
@@ -322,20 +339,24 @@ def slugify(title: str) -> str:
 
 async def deliver(client: httpx.AsyncClient, state: dict, script: dict, clip: Path) -> None:
     """Copy the Clip and its metadata to /output, then send it to Telegram."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    locale = state.get("locale", locales.DEFAULT)
+    out = output_dir(locale)
+    out.mkdir(parents=True, exist_ok=True)
     stem = f"{datetime.now():%Y%m%d-%H%M}-{slugify(script['title'])}"
-    final = OUTPUT_DIR / f"{stem}.mp4"
+    final = out / f"{stem}.mp4"
     shutil.copy2(clip, final)
-    (OUTPUT_DIR / f"{stem}.txt").write_text(metadata_text(script), encoding="utf-8")
+    (out / f"{stem}.txt").write_text(metadata_text(script), encoding="utf-8")
 
     srt = clip.parent / "captions.srt"
-    final_srt = OUTPUT_DIR / f"{stem}.srt"
+    final_srt = out / f"{stem}.srt"
     if srt.exists():
         shutil.copy2(srt, final_srt)
 
     # Publishing is outward-facing and cannot be undone quietly, so it stays
     # behind a button even though everything up to here is automatic.
-    offer_upload = youtube.configured()
+    # Per Locale: no credentials for this Locale's channel means no button,
+    # rather than a button that would publish to the other channel.
+    offer_upload = youtube.configured(locale)
     sent = await send_video(
         client, final, metadata_text(script),
         **({"reply_markup": UPLOAD_KEYBOARD} if offer_upload else {}),
@@ -351,6 +372,10 @@ async def deliver(client: httpx.AsyncClient, state: dict, script: dict, clip: Pa
         last_script=script,
         last_clip_id=state.get("clip_id"),
         last_topic=state.get("topic"),
+        # /redo renders this Script again long after a Clip in the other
+        # Locale may have taken over the live slots; reading the live one
+        # would speak an English script in a Thai voice.
+        last_locale=locale,
         upload_message_id=(sent or {}).get("message_id") if offer_upload else None,
     )
     save_state(state)
@@ -393,7 +418,13 @@ def trend_origin(state: dict, topic: str) -> dict | None:
 # the human types.
 RESULT_TOPIC = re.compile(
     r"ชนะ|แพ้|ผลการแข่ง|ผลบอล|สกอร์|ตกรอบ|เข้ารอบ|คว้าแชมป์|ได้แชมป์|"
-    r"ประกาศผล|เมื่อคืน|\d\s*[-:]\s*\d"
+    r"ประกาศผล|เมื่อคืน|\d\s*[-:]\s*\d|"
+    # The same trap in English, for Topics sent with /en. One regex rather
+    # than one per Locale: these words do not collide across the two, and a
+    # false positive already has an escape hatch in FORCE_PREFIX.
+    r"\b(beat|beats|defeated|final score|scoreline|standings|highlights|"
+    r"last night|who won|won the|wins the|knocked out)\b",
+    re.IGNORECASE,
 )
 BARE_URL = re.compile(r"https?://\S+\Z", re.IGNORECASE)
 FORCE_PREFIX = "!"
@@ -404,8 +435,13 @@ def result_shaped(topic: str) -> bool:
 
 
 async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
-                      feedback: str = "", auto: bool = False) -> None:
+                      feedback: str = "", auto: bool = False,
+                      locale: str | None = None) -> None:
     previous = state.get("script") if feedback else None
+    # A revision belongs to the Clip already open, and that Clip's Locale is
+    # not up for renegotiation halfway through.
+    locale = state.get("locale", locales.DEFAULT) if previous is not None else (
+        locale or locales.DEFAULT)
     # Checked here rather than in on_text so the trend buttons and the
     # automatic pick go through the same door, and before anything is claimed:
     # a Topic that is turned away leaves the state exactly as it was. Only a
@@ -434,11 +470,12 @@ async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
     # A revision belongs to the Manifest already open for this Topic; only a
     # fresh Topic starts a new one.
     if previous is None:
-        state["clip_id"] = manifest.start(topic)
+        state["locale"] = locale
+        state["clip_id"] = manifest.start(topic, locale)
         # Assigned before the Script exists and never re-rolled: a Script
         # rewritten on feedback keeps the Variant it was born with, or the
         # human's taste would quietly pick the winner (docs/adr/0004).
-        assignment = experiment.assign()
+        assignment = experiment.assign(locale=locale)
         manifest.update(state["clip_id"], **assignment)
         state["style"] = assignment["style"]
         origin = trend_origin(state, topic)
@@ -461,9 +498,13 @@ async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
             topic,
             previous=previous,
             feedback=feedback,
-            avoid=history.recent_titles(),
-            winners=await analytics.winning_examples(),
+            # Both lists are Thai titles from the Thai channel: history has no
+            # Locale until an upload writes one (batch 2), and there is nothing
+            # to be learnt for a US audience from what a Thai one watched.
+            avoid=history.recent_titles() if locale == locales.DEFAULT else [],
+            winners=await analytics.winning_examples() if locale == locales.DEFAULT else [],
             style=state.get("style", ""),
+            locale=locale,
         )
     except Exception as exc:
         logger.exception("generate failed")
@@ -479,7 +520,8 @@ async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
             # makes the model return junk shows up as its own number.
             manifest.update(state.get("clip_id"), outcome="generate_failed",
                             error=str(exc)[:500])
-            state.update(mode="idle", script=None, clip_id=None, style="")
+            state.update(mode="idle", script=None, clip_id=None, style="",
+                         locale=locales.DEFAULT)
         save_state(state)
         await say(client, f"เขียนสคริปต์ไม่สำเร็จ: {exc}")
         return
@@ -510,7 +552,10 @@ async def do_render(client: httpx.AsyncClient, state: dict,
 
     workdir = WORK_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
     try:
-        clip, details = await render.build(script, workdir, supplied=supplied)
+        clip, details = await render.build(
+            script, workdir, supplied=supplied,
+            locale=state.get("locale", locales.DEFAULT),
+        )
         manifest.update(state.get("clip_id"), outcome="rendered", render=details)
         await deliver(client, state, script, clip)
     except Exception as exc:
@@ -520,7 +565,8 @@ async def do_render(client: httpx.AsyncClient, state: dict,
     finally:
         # Intermediate PNG/audio dwarf the mp4; never leave them behind.
         shutil.rmtree(workdir, ignore_errors=True)
-        state.update(mode="idle", script=None, topic=None, clip_id=None, style="")
+        state.update(mode="idle", script=None, topic=None, clip_id=None, style="",
+                     locale=locales.DEFAULT)
         save_state(state)
 
 
@@ -588,13 +634,17 @@ async def on_flow(client: httpx.AsyncClient, state: dict) -> None:
         "topic": state.get("topic"),
         "script": script,
         "style": state.get("style", ""),
+        # Snapshotted for the same reason as the Script itself: the bot goes
+        # idle here and the next Topic may be in the other Locale, which would
+        # otherwise decide this Clip's voice and folder when it finally renders.
+        "locale": state.get("locale", locales.DEFAULT),
         "card": 0,
         "prompt": prompt,
         "prompt_message_id": (sent or {}).get("message_id"),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     state.update(mode="idle", script=None, topic=None, clip_id=None, style="",
-                 message_id=None)
+                 locale=locales.DEFAULT, message_id=None)
     save_state(state)
 
 
@@ -679,6 +729,7 @@ async def render_parked(client: httpx.AsyncClient, state: dict) -> None:
     state.update(
         script=parked["script"], topic=parked.get("topic"),
         clip_id=parked.get("clip_id"), style=parked.get("style", ""),
+        locale=parked.get("locale", locales.DEFAULT),
         message_id=parked.get("ready_message_id"),
     )
     save_state(state)
@@ -769,6 +820,9 @@ async def on_long_storyboard(client: httpx.AsyncClient, brief: str) -> None:
 async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
     clip = Path(state.get("last_clip") or "")
     script = state.get("last_script")
+    # Snapshotted at deliver(): the live slots may belong to a Clip in the
+    # other Locale by now, and this upload is outward-facing and final.
+    locale = state.get("last_locale", locales.DEFAULT)
     if not script or not clip.is_file():
         await say(client, "ไม่เจอคลิปที่จะอัปแล้ว (บอทน่าจะรีสตาร์ทไป) ลอง render ใหม่")
         return
@@ -779,7 +833,7 @@ async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
     await say(client, "⬆️ กำลังอัปโหลด...")
 
     try:
-        video_id, privacy = await youtube.upload(clip, script)
+        video_id, privacy = await youtube.upload(clip, script, locale)
     except Exception as exc:
         logger.exception("upload failed")
         await say(client, f"อัปโหลดไม่สำเร็จ: {exc}")
@@ -792,7 +846,7 @@ async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
     if os.environ.get("YOUTUBE_SET_THUMBNAIL", "").lower() in ("1", "true", "yes"):
         try:
             cover = render.first_frame(clip, clip.with_suffix(".jpg"))
-            await youtube.set_thumbnail(video_id, cover)
+            await youtube.set_thumbnail(video_id, cover, locale)
             thumbnail_note = "\nปก: เฟรมแรกของคลิป"
         except Exception as exc:
             logger.exception("thumbnail failed")
@@ -802,13 +856,13 @@ async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
     srt = Path(state.get("last_srt") or "")
     if srt.is_file():
         try:
-            await youtube.add_captions(video_id, srt)
+            await youtube.add_captions(video_id, srt, locale)
             captions_note = "\nซับ: ใส่แล้ว"
         except Exception as exc:
             logger.exception("captions failed")
             captions_note = f"\n⚠️ ใส่ซับไม่ได้: {exc}"
 
-    history.record(video_id, script, state.get("last_topic") or "")
+    history.record(video_id, script, state.get("last_topic") or "", locale)
     manifest.update(
         state.get("last_clip_id"),
         published=True,
@@ -826,7 +880,7 @@ async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
         # the first option is the opening frame.
         "ปกในฟีด Shorts ตั้งผ่าน API ไม่ได้ — เปิดในแอป YouTube → Edit → Cover → เลือกอันแรก"
     )
-    if privacy != os.environ.get("YOUTUBE_PRIVACY", "public"):
+    if privacy != (youtube._env("PRIVACY", locale) or "public"):
         # Google forces uploads from an unaudited project to private.
         note += "\n⚠️ YouTube เปลี่ยนสถานะเอง — โปรเจกต์ยังไม่ผ่าน API audit"
     await say(client, note)
@@ -896,19 +950,20 @@ def format_topics(topics: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def on_trends(client: httpx.AsyncClient, state: dict, auto: bool = False) -> None:
-    """What Thailand is searching for and watching, turned into Topics.
+async def on_trends(client: httpx.AsyncClient, state: dict, auto: bool = False,
+                    locale: str = locales.DEFAULT) -> None:
+    """What the Locale's country is searching for and watching, as Topics.
 
     The raw list is sent too: a suggestion that drifted from its source is only
     catchable against the thing it came from.
     """
     await say(client, "📈 กำลังดู trend...")
-    rows = await trends.collect()
+    rows = await trends.collect(locale)
     await say(client, trends.format_raw(rows))
     if not rows:
         return
     try:
-        topics = await script_gen.suggest_topics(rows)
+        topics = await script_gen.suggest_topics(rows, locale)
     except Exception as exc:
         logger.exception("suggest_topics failed")
         await say(client, f"แปลง trend เป็นหัวข้อไม่สำเร็จ: {exc}")
@@ -917,6 +972,9 @@ async def on_trends(client: httpx.AsyncClient, state: dict, auto: bool = False) 
     # Remembered so a Topic typed back gets its origin recorded — the point of
     # the whole exercise is answering "did trend topics do better?" later.
     state["suggested"] = topics
+    # A Topic picked off this list is written for the audience the list came
+    # from; without this, an 💡 button on a US list would write in Thai.
+    state["suggested_locale"] = locale
     state["suggested_at"] = datetime.now().isoformat(timespec="seconds")
     keyboard = topics_keyboard(topics, state["suggested_at"])
     if auto:
@@ -947,7 +1005,8 @@ async def auto_pick(client: httpx.AsyncClient, state: dict) -> None:
         return
     await retire_buttons(client, state.pop("trends_message_id", None))
     await say(client, f"🎲 ไม่มีใครเลือก สุ่มได้: {topic}\nเขียนสคริปต์แล้ว render ให้เลย")
-    await make_script(client, state, topic, auto=True)
+    await make_script(client, state, topic, auto=True,
+                      locale=state.get("suggested_locale", locales.DEFAULT))
 
 
 def topics_keyboard(topics: list[dict], stamp: str) -> dict:
@@ -1072,9 +1131,35 @@ async def on_redo(client: httpx.AsyncClient, state: dict) -> None:
     # The Clip is re-opened where it left off, so the re-render lands in the
     # Manifest it belongs to instead of starting an untitled one.
     state.update(script=script, topic=state.get("last_topic"),
-                 clip_id=state.get("last_clip_id"), message_id=None)
+                 clip_id=state.get("last_clip_id"),
+                 locale=state.get("last_locale", locales.DEFAULT), message_id=None)
     await say(client, f"🔁 render ซ้ำ: {script['title']}")
     spawn(do_render(client, state), "do_render")
+
+
+async def on_english(client: httpx.AsyncClient, state: dict, topic: str) -> None:
+    """/en <topic>: the same pipeline, written and spoken for a US audience.
+
+    Refused rather than queued while something else is open. A Topic typed
+    while a Script is under review means "revise this one", and letting /en
+    through there would silently abandon a Script the human is still reading.
+    """
+    if not topic:
+        await say(client, (
+            "พิมพ์หัวข้อภาษาอังกฤษต่อท้ายด้วยนะ เช่น\n"
+            "/en why your docker logs eat the whole disk\n\n"
+            "หัวข้อภาษาไทยก็ใส่ได้ บอทเขียนสคริปต์ออกมาเป็นอังกฤษให้อยู่ดี"
+        ))
+        return
+    mode = state.get("mode", "idle")
+    if mode in BUSY_MODES:
+        job = "เขียนสคริปต์" if mode == "writing" else "render"
+        await say(client, f"⏳ กำลัง{job}อยู่ รอให้เสร็จก่อนนะ")
+        return
+    if mode == "review":
+        await say(client, "ยังมีสคริปต์ค้างรีวิวอยู่ กด 🎬 หรือ 🗑 ให้อันนั้นก่อนนะ")
+        return
+    spawn(make_script(client, state, topic, locale="en"), "make_script")
 
 
 async def on_text(client: httpx.AsyncClient, state: dict, text: str) -> None:
@@ -1090,7 +1175,13 @@ async def on_text(client: httpx.AsyncClient, state: dict, text: str) -> None:
         await take_snapshots(client, state, announce=True)
         return
     if text.startswith("/trends"):
-        spawn(on_trends(client, state), "on_trends")
+        # `/trends en` reads the US lists and asks for English Topics; bare
+        # /trends is Thai, as it always has been.
+        wanted = text[len("/trends"):].strip().lower()
+        if wanted and wanted not in locales.codes():
+            await say(client, f"ไม่รู้จักภาษา {wanted} — มีแค่ {', '.join(locales.codes())}")
+            return
+        spawn(on_trends(client, state, locale=wanted or locales.DEFAULT), "on_trends")
         return
     if text.startswith("/storyboard"):
         brief = text[len("/storyboard"):].strip()
@@ -1110,6 +1201,9 @@ async def on_text(client: httpx.AsyncClient, state: dict, text: str) -> None:
         return
     if text.startswith("/redo"):
         await on_redo(client, state)
+        return
+    if text.startswith("/en"):
+        await on_english(client, state, text[len("/en"):].strip())
         return
     # A mistyped command is not a Topic. Letting it fall through spends minutes
     # of model time and leaves a Manifest named after the typo — /stat did that
@@ -1208,7 +1302,9 @@ async def on_pick(client: httpx.AsyncClient, state: dict, data: str) -> None:
         return
     # Verbatim, so trend_origin matches it and the origin gets recorded.
     await say(client, f"👍 {topic}")
-    spawn(make_script(client, state, topic), "make_script")
+    spawn(make_script(client, state, topic,
+                      locale=state.get("suggested_locale", locales.DEFAULT)),
+          "make_script")
 
 
 def is_ours(update: dict) -> bool:

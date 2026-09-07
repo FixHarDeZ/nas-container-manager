@@ -28,12 +28,15 @@ def load() -> list[dict]:
         return []
 
 
-def record(video_id: str, script: dict, topic: str) -> None:
+def record(video_id: str, script: dict, topic: str, locale: str = "th") -> None:
     entries = load()
     entries.append({
         "video_id": video_id,
         "title": script.get("title", ""),
         "topic": topic,
+        # Which channel this went to (docs/adr/0008). Entries written before
+        # Locales existed have no field; every reader treats that as Thai.
+        "locale": locale,
         "uploaded_at": datetime.now().isoformat(timespec="seconds"),
     })
     PATH.parent.mkdir(parents=True, exist_ok=True)

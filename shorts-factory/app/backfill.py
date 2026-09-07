@@ -51,7 +51,9 @@ def _files_by_title() -> dict[str, Path]:
     found = {}
     if not OUTPUT_DIR.is_dir():
         return found
-    for path in OUTPUT_DIR.glob("*.txt"):
+    # rglob, not glob: an English Clip lands in /output/en, and a Manifest
+    # that is not rebuilt for it is a Clip with no numbers at all.
+    for path in OUTPUT_DIR.rglob("*.txt"):
         try:
             first = path.read_text(encoding="utf-8").splitlines()[0].strip()
         except (OSError, IndexError):
@@ -81,7 +83,10 @@ def run() -> int:
             except OSError:
                 logger.warning("อ่าน %s ไม่ได้", srt)
 
-        clip_id = manifest.start(entry.get("topic") or "")
+        # The only surviving trace of which Locale an old Clip belongs to is
+        # the folder its metadata file sits in.
+        locale = "en" if meta is not None and meta.parent.name == "en" else "th"
+        clip_id = manifest.start(entry.get("topic") or "", locale)
         manifest.update(
             clip_id,
             created_at=entry.get("uploaded_at") or datetime.now().isoformat(timespec="seconds"),

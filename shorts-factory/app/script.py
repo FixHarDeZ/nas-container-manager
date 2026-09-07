@@ -10,7 +10,7 @@ import time
 
 from openai import AsyncOpenAI
 
-from app import render
+from app import locales, render
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +19,22 @@ MAX_LINES_PER_CARD = 4
 # What the model is asked to aim for. Not enforced: the renderer measures real
 # pixel width and shrinks the font to fit, and character count is a poor proxy
 # anyway — Thai glyphs are narrower than Latin ones.
-TARGET_CHARS_PER_LINE = 22
+TARGET_CHARS_PER_LINE = locales.get("th")["target_chars"]
 # Told to the model, which cannot measure pixels, and used as the fallback rule
 # wherever the font is unavailable. The real gate is _too_wide(): a character
 # count is a poor proxy for Thai, where vowels and tone marks carry no advance
 # width. Measured over every line this bot has written (209 lines, 2026-08-29):
 # the widest came to 719px at 33 characters, well inside the 864px available.
-HARD_MAX_CHARS_PER_LINE = 34
+HARD_MAX_CHARS_PER_LINE = locales.get("th")["hard_max_chars"]
 
 LATIN = re.compile(r"[A-Za-z]+")
+THAI = re.compile(r"[\u0e00-\u0e7f]+")
+# What `spoken` may not contain, per Locale. A Thai voice handed a Latin word
+# switches accent mid-sentence and rushes it; an English voice handed Thai
+# script cannot say it at all.
+FORBIDDEN_IN_SPOKEN = {"thai": LATIN, "latin": THAI}
 
-SYSTEM_PROMPT = f"""คุณเป็นคนเขียนสคริปต์ YouTube Shorts ภาษาไทย
+SYSTEM_PROMPT_TH = f"""คุณเป็นคนเขียนสคริปต์ YouTube Shorts ภาษาไทย
 
 หัวข้ออะไรก็ได้ตามที่สั่ง (เทค การเงิน สุขภาพ ไลฟ์สไตล์ ความรู้รอบตัว ฯลฯ)
 เขียนแบบคนที่รู้เรื่องนั้นจริงและเล่าให้เพื่อนฟัง ไม่ใช่ท่องสารานุกรม
@@ -72,7 +77,7 @@ SYSTEM_PROMPT = f"""คุณเป็นคนเขียนสคริปต
              "narration": "...", "spoken": "..."}}]}}"""
 
 
-TRENDS_PROMPT = """คุณเป็นคนเลือกหัวข้อคลิป YouTube Shorts ภาษาไทย
+TRENDS_PROMPT_TH = """คุณเป็นคนเลือกหัวข้อคลิป YouTube Shorts ภาษาไทย
 
 จะได้รับรายการ "สิ่งที่คนไทยกำลังค้นหา/กำลังดู" ตอนนี้ หน้าที่คุณคือแปลงเป็น
 **หัวข้อคลิปที่ทำได้จริง 5 หัวข้อ**
@@ -97,6 +102,103 @@ TRENDS_PROMPT = """คุณเป็นคนเลือกหัวข้อ�
 
 ตอบเป็น JSON อย่างเดียว:
 {"topics": [{"topic": "...", "kind": "evergreen", "category": "...", "from": "...", "why": "..."}]}"""
+
+
+# The English prompt is written in English on purpose: an English Script asked
+# for in Thai comes back translated rather than written, and it reads like it.
+# `spoken` survives the crossing — an English voice does not need words
+# transliterated, but it does need numbers, symbols and initialisms spelled the
+# way they are said.
+EN = locales.get("en")
+SYSTEM_PROMPT_EN = f"""You write YouTube Shorts scripts in English for a US audience.
+
+Any topic goes (tech, money, health, lifestyle, general knowledge). Write like
+someone who actually knows the subject telling a friend, not an encyclopedia.
+
+**Never make claims about real people (celebrities, politicians, athletes),
+breaking news, court cases or match results.** If the topic points that way,
+cover only the checkable general-knowledge angle.
+
+Write a vertical clip 40-50 seconds long, split into cards of 6-9 seconds.
+
+Rules:
+- {MIN_CARDS}-{MAX_CARDS} cards
+- the first card is the hook: it must stop a thumb within 3 seconds by asking a
+  question or naming a pain the viewer really has. Never open with "today we're
+  going to talk about"
+- the last card is a short takeaway the viewer can use
+- each card has lines = 1-{MAX_LINES_PER_CARD} lines of on-screen text, about
+  {EN["target_chars"]} characters each (never more than {EN["hard_max_chars"]})
+  **Break the lines yourself at word boundaries.** The renderer draws exactly
+  what you send; a line over the limit is rejected, and a long line shrinks the
+  font until it is unreadable on a phone.
+- narration = the sentence for that card, spoken English rather than written
+  English, long enough to read aloud in 6-9 seconds. No emoji and no symbols
+  that cannot be read out loud.
+  **Put a comma wherever a speaker would draw breath**, roughly every 10-15 words.
+- spoken = the same sentence, written the way it is said, and it must contain
+  **no Thai characters at all**. Spell out anything the voice would stumble on:
+  numbers as words (2026 -> twenty twenty six, 1-2 minutes -> one to two
+  minutes), symbols as words (%, $, & -> percent, dollars, and), and
+  initialisms with spaces so they are read letter by letter (CPU -> C P U).
+  **No hyphens in spoken** — the voice pauses on them. GPT-4 -> GPT four.
+  If nothing needs respelling, repeat narration verbatim.
+- code = a short command or code block, at most 4 lines, only on a card that
+  really shows one. Otherwise null.
+- query = **2-4 English words** to search stock footage for that card's
+  background. It must be something a camera can film: "server room racks",
+  "developer typing keyboard", "data center lights". Never abstract phrases
+  like "docker configuration" or "log rotation".
+- title/description/hashtags = for the YouTube upload; 3-5 hashtags, each
+  starting with #
+- category = a short English word for what this clip is about (tech, money,
+  health, lifestyle, gaming, general) — recorded to see which category holds
+  viewers, never shown in the clip
+
+Answer with JSON only, nothing outside the JSON:
+{{"title": "...", "description": "...", "hashtags": ["#..."], "category": "...",
+  "cards": [{{"lines": ["..."], "code": null, "query": "...",
+             "narration": "...", "spoken": "..."}}]}}"""
+
+
+TRENDS_PROMPT_EN = """You pick topics for English-language YouTube Shorts aimed at a US audience.
+
+You will be given a list of what people in the US are searching for and
+watching right now. Turn it into **5 topics that can actually be made**.
+
+Hard rules:
+- **Never propose a topic that is breaking news, politics, a court case, a
+  match result, or anything about a real person** (celebrity, politician,
+  athlete): the clip would end up asserting things about real people with no
+  source. If a trend is about a person, **skip it**, or take only the angle
+  that can be explained without naming anyone. Trend "M6 chip" -> "how the M6
+  differs from the M4" (fine); trend "<politician>" -> skip.
+- **Never propose a topic that speculates about a real person** ("is that actor
+  coming back", "who did they break up with", "will that CEO resign") — that is
+  rumour, the bot cannot know, and it would put words in a real person's mouth.
+  If the trend comes from a film, series or game, cover **the work itself**.
+- Take topics explainable from settled facts, not ones that need today's news
+  to get right.
+- One line per topic, written so it can be sent straight to the script writer.
+- kind = "evergreen" if it is still worth watching in 6 months, "spike" if it
+  dies with the trend.
+- category = short English word: tech, money, health, lifestyle, gaming, general
+- from = the term or video title that sparked it (copied from the list given)
+- why = one short line on why people would watch
+
+Answer with JSON only:
+{"topics": [{"topic": "...", "kind": "evergreen", "category": "tech", "from": "...", "why": "..."}]}"""
+
+SYSTEM_PROMPTS = {"th": SYSTEM_PROMPT_TH, "en": SYSTEM_PROMPT_EN}
+TRENDS_PROMPTS = {"th": TRENDS_PROMPT_TH, "en": TRENDS_PROMPT_EN}
+
+
+def system_prompt(locale: str = locales.DEFAULT) -> str:
+    return SYSTEM_PROMPTS.get(locale, SYSTEM_PROMPT_TH)
+
+
+def trends_prompt(locale: str = locales.DEFAULT) -> str:
+    return TRENDS_PROMPTS.get(locale, TRENDS_PROMPT_TH)
 
 
 class ScriptError(ValueError):
@@ -251,30 +353,45 @@ async def _say(client: AsyncOpenAI, messages: list[dict], temperature: float,
             task.cancel()
 
 
-def _too_wide(line: str) -> int:
+def _too_wide(line: str, locale: str = locales.DEFAULT) -> int:
     """Characters to cut so the renderer can draw the line, 0 if it already can.
 
-    The renderer shrinks the font until the text fits, so the only line it
-    cannot draw is one still too wide at its smallest size. Measured against
+    The renderer shrinks the font until the text fits, so the line it cannot
+    draw at all is one still too wide at its smallest size. Measured against
     the narrower of the two draw paths: text over footage is laid out at the
     1080px frame, not the oversized 1210px gradient card.
+
+    That pixel floor is the whole test for Thai, whose glyphs fit at full size
+    anyway (34 characters came to 719px of 864 at size 92). It is not enough
+    for Latin, which runs about 50px a character against Thai's 21: a 38-
+    character English line clears the floor at size 40 and is then *drawn* at
+    size 40, unreadable on a phone. So a Locale can also hold the model to its
+    character count, and the answer is whichever cut is larger.
     """
+    spec = locales.get(locale)
+    counted = max(0, len(line) - spec["hard_max_chars"]) if spec.get("enforce_char_count") else 0
     try:
         font = render._font(render.THAI_BOLD, render.MIN_TEXT_SIZE)
     except (OSError, RuntimeError):
         # No Waree, or Pillow without Raqm — off the container. The renderer
         # refuses to run at all in that state, so fall back to the count
         # rather than let every line through.
-        return max(0, len(line) - HARD_MAX_CHARS_PER_LINE)
+        return max(counted, len(line) - spec["hard_max_chars"], 0)
     usable = render.W - render.MARGIN * 2
     width = font.getlength(line)
     if width <= usable:
-        return 0
-    return max(1, round(len(line) * (width - usable) / width))
+        return counted
+    return max(counted, 1, round(len(line) * (width - usable) / width))
 
 
-def validate(script: dict) -> dict:
-    """Reject a Script the renderer would mangle. Raises ScriptError."""
+def validate(script: dict, locale: str = locales.DEFAULT) -> dict:
+    """Reject a Script the renderer would mangle. Raises ScriptError.
+
+    Messages stay in Thai even for an English Script: they are read by the
+    human in Telegram, and the model is fed them as a correction, which it
+    handles in either language.
+    """
+    spec = locales.get(locale)
     for key in ("title", "description", "hashtags", "cards", "category"):
         if key not in script:
             raise ScriptError(f"ไม่มีฟิลด์ {key}")
@@ -290,7 +407,7 @@ def validate(script: dict) -> dict:
         for line in lines:
             if not isinstance(line, str) or not line.strip():
                 raise ScriptError(f"card {i}: มีบรรทัดว่าง")
-            over = _too_wide(line)
+            over = _too_wide(line, locale)
             if over:
                 # Say how much to cut: this message is fed back to the model on
                 # the retry, and it cannot measure the line itself. Only offer
@@ -306,14 +423,19 @@ def validate(script: dict) -> dict:
             raise ScriptError(f"card {i}: ไม่มี narration")
         spoken = str(card.get("spoken", "")).strip()
         if not spoken:
-            raise ScriptError(f"card {i}: ไม่มี spoken (narration ฉบับทับศัพท์ไทยล้วน)")
-        # A Latin word makes the voice switch accent mid-sentence: it reads the
-        # English at English pace, which lands as a rushed, unclear burst inside
-        # Thai speech. The screen keeps the real spelling; only the voice gets
-        # the transliteration.
-        if LATIN.search(spoken):
+            raise ScriptError(f"card {i}: ไม่มี spoken (narration ฉบับที่เสียงอ่านได้)")
+        # A Latin word makes the Thai voice switch accent mid-sentence: it reads
+        # the English at English pace, which lands as a rushed, unclear burst
+        # inside Thai speech. The screen keeps the real spelling; only the voice
+        # gets the transliteration. Mirrored for English, where Thai script in
+        # `spoken` is something the voice simply cannot pronounce.
+        forbidden = FORBIDDEN_IN_SPOKEN[spec["spoken_script"]]
+        found = forbidden.findall(spoken)
+        if found:
+            wrong = "ละติน" if spec["spoken_script"] == "thai" else "ไทย"
             raise ScriptError(
-                f"card {i}: spoken มีตัวอักษรละติน ({LATIN.findall(spoken)[:3]}) ต้องทับศัพท์เป็นไทยทั้งหมด"
+                f"card {i}: spoken มีตัวอักษร{wrong} ({found[:3]}) ต้องเขียนเป็น"
+                f"{'ไทย' if spec['spoken_script'] == 'thai' else 'อังกฤษ'}ทั้งหมด"
             )
         if not str(card.get("query", "")).strip():
             raise ScriptError(f"card {i}: ไม่มี query สำหรับหา footage")
@@ -335,23 +457,33 @@ def _parse(raw: str) -> dict:
         raise ScriptError(f"JSON พัง: {exc}") from exc
 
 
-def _context_note(avoid: list[str], winners: list[str]) -> str:
+NOTES = {
+    "th": (
+        "เคยทำคลิปเรื่องพวกนี้ไปแล้ว ห้ามเขียนซ้ำมุมเดิม ถ้าหัวข้อใกล้เคียงให้หามุมใหม่:\n",
+        "คลิปที่คนดูจนจบมากที่สุดคือเรื่องพวกนี้ เขียนให้ใกล้เคียงแนวนี้:\n",
+    ),
+    "en": (
+        "These clips have already been made. Do not repeat the same angle; find "
+        "a new one if the topic is close:\n",
+        "These are the clips people watched furthest through. Write in that "
+        "direction:\n",
+    ),
+}
+
+
+def _context_note(avoid: list[str], winners: list[str],
+                  locale: str = locales.DEFAULT) -> str:
     """Tell the model what has been made already and what worked."""
+    avoid_note, winners_note = NOTES.get(locale, NOTES["th"])
     parts = []
     if avoid:
-        parts.append(
-            "เคยทำคลิปเรื่องพวกนี้ไปแล้ว ห้ามเขียนซ้ำมุมเดิม ถ้าหัวข้อใกล้เคียงให้หามุมใหม่:\n"
-            + "\n".join(f"- {title}" for title in avoid)
-        )
+        parts.append(avoid_note + "\n".join(f"- {title}" for title in avoid))
     if winners:
-        parts.append(
-            "คลิปที่คนดูจนจบมากที่สุดคือเรื่องพวกนี้ เขียนให้ใกล้เคียงแนวนี้:\n"
-            + "\n".join(f"- {title}" for title in winners)
-        )
+        parts.append(winners_note + "\n".join(f"- {title}" for title in winners))
     return "\n\n".join(parts)
 
 
-async def suggest_topics(rows: list[dict]) -> list[dict]:
+async def suggest_topics(rows: list[dict], locale: str = locales.DEFAULT) -> list[dict]:
     """Turn raw trend rows into Topics the bot could actually be given.
 
     Kept separate from `generate()`: this decides *what* to make, which is the
@@ -365,7 +497,7 @@ async def suggest_topics(rows: list[dict]) -> list[dict]:
     )
     raw = await _say(
         _client(),
-        [{"role": "system", "content": TRENDS_PROMPT},
+        [{"role": "system", "content": trends_prompt(locale)},
          {"role": "user", "content": listing}],
         temperature=0.7,
         budget=BUDGET_SECONDS,
@@ -384,6 +516,7 @@ async def generate(
     avoid: list[str] | None = None,
     winners: list[str] | None = None,
     style: str = "",
+    locale: str = locales.DEFAULT,
 ) -> dict:
     """Write a Script for `topic`, optionally revising `previous` per `feedback`.
 
@@ -392,13 +525,14 @@ async def generate(
     the exact words that produced this Script — the base prompt will drift, and
     a Variant name alone would not say what it meant at the time.
     """
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    note = _context_note(avoid or [], winners or [])
+    messages = [{"role": "system", "content": system_prompt(locale)}]
+    note = _context_note(avoid or [], winners or [], locale)
     if note:
         messages.append({"role": "system", "content": note})
     if style:
         messages.append({"role": "system", "content": style})
-    messages.append({"role": "user", "content": f"หัวข้อ: {topic}"})
+    label = "หัวข้อ" if locale == "th" else "Topic"
+    messages.append({"role": "user", "content": f"{label}: {topic}"})
     if previous is not None:
         messages.append({"role": "assistant", "content": json.dumps(previous, ensure_ascii=False)})
         messages.append({"role": "user", "content": f"แก้ตามนี้: {feedback}"})
@@ -476,7 +610,7 @@ async def generate(
             )
             continue
         try:
-            return validate(parsed)
+            return validate(parsed, locale)
         except ScriptError as exc:
             excerpt = raw[:300]
             logger.warning(

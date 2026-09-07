@@ -13,7 +13,7 @@ from pathlib import Path
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont, features
 
-from app import footage
+from app import footage, locales
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ CLAUSE_DASH = re.compile(r"\s+[-‐-―]\s+")
 WORD_DASH = re.compile(r"[-‐-―]")
 
 
-def _speakable(narration: str) -> str:
+def _speakable(narration: str, locale: str = locales.DEFAULT) -> str:
     """A full stop inside a Card would split it into two sentences.
 
     A hyphen is read as a break, not as part of the word: "เอฟ-สามสิบห้า" comes
@@ -155,7 +155,11 @@ def _speakable(narration: str) -> str:
     on for 0.12-0.53s; one inside a word is dropped so the name is said whole.
     """
     text = narration.replace(".", ",")
-    return WORD_DASH.sub("", CLAUSE_DASH.sub(", ", text)).strip()
+    # A hyphen inside a Thai word is noise once transliterated, but inside an
+    # English one it joins two real words ("state-of-the-art"), so there it
+    # becomes a space rather than nothing.
+    glue = "" if locales.get(locale)["spoken_script"] == "thai" else " "
+    return WORD_DASH.sub(glue, CLAUSE_DASH.sub(", ", text)).strip()
 
 
 SAY_PATH = Path(os.environ.get("DATA_DIR", "/data")) / "say.json"
@@ -188,7 +192,7 @@ def say_set(wrong: str, right: str) -> None:
     SAY_PATH.write_text(json.dumps(entries, ensure_ascii=False, indent=2), "utf-8")
 
 
-def _tts_text(card: dict) -> str:
+def _tts_text(card: dict, locale: str = locales.DEFAULT) -> str:
     """What the voice reads: the transliterated form, never the screen form.
 
     Overrides are applied here rather than at the join in `narrate()` so both
@@ -196,27 +200,30 @@ def _tts_text(card: dict) -> str:
     make every Card look misaligned and drop the Clip to per-Card speech.
     Longest key first, so an entry cannot be half-eaten by a shorter one.
     """
-    text = _speakable(card.get("spoken") or card["narration"])
+    text = _speakable(card.get("spoken") or card["narration"], locale)
     for wrong, right in sorted(say_as().items(), key=lambda kv: -len(kv[0])):
         text = text.replace(wrong, right)
     return text
 
 
-async def narrate(cards: list[dict], path: Path) -> tuple[Path, list[float]] | None:
+async def narrate(cards: list[dict], path: Path,
+                  locale: str = locales.DEFAULT) -> tuple[Path, list[float]] | None:
     """Speak the whole Script in one breath and report where each Card starts.
 
     One synthesis call keeps the prosody continuous — speaking Card by Card
     restarts the intonation every time and reads as a series of announcements.
     Thai emits no `WordBoundary` events (no spaces to boundary on), but it does
     emit one `SentenceBoundary` per separated Card, which is what the cuts use.
+    Verified for en-US-AndrewNeural too (2026-09-07): three Cards in, three
+    SentenceBoundary events out, so both Locales take this path.
 
     Returns None when the boundaries cannot be trusted; the caller then falls
     back to speaking each Card separately.
     """
-    narrations = [_tts_text(c) for c in cards]
+    narrations = [_tts_text(c, locale) for c in cards]
     communicate = edge_tts.Communicate(
         CARD_SEPARATOR.join(narrations),
-        os.environ.get("TTS_VOICE", "th-TH-NiwatNeural"),
+        locales.voice(locale),
         rate=os.environ.get("TTS_RATE", "+0%"),
         pitch=os.environ.get("TTS_PITCH", "+0Hz"),
     )
@@ -247,7 +254,7 @@ async def narrate(cards: list[dict], path: Path) -> tuple[Path, list[float]] | N
     return path, starts
 
 
-async def speak(text: str, path: Path) -> Path:
+async def speak(text: str, path: Path, locale: str = locales.DEFAULT) -> Path:
     """Synthesise one Card's narration.
 
     Rate and pitch are configurable because edge-tts defaults read slow and
@@ -255,7 +262,7 @@ async def speak(text: str, path: Path) -> Path:
     """
     await edge_tts.Communicate(
         text,
-        os.environ.get("TTS_VOICE", "th-TH-NiwatNeural"),
+        locales.voice(locale),
         rate=os.environ.get("TTS_RATE", "+0%"),
         pitch=os.environ.get("TTS_PITCH", "+0Hz"),
     ).save(str(path))
@@ -487,20 +494,22 @@ def tighten(audio: Path, starts: list[float], workdir: Path) -> tuple[Path, list
     return joined, starts
 
 
-async def _narration_track(cards: list[dict], workdir: Path) -> tuple[Path, list[float]]:
+async def _narration_track(cards: list[dict], workdir: Path,
+                           locale: str = locales.DEFAULT) -> tuple[Path, list[float]]:
     """One audio track for the whole Script, plus the start time of each Card.
 
     Preferred: a single synthesis call, so the delivery never resets mid-clip.
     Fallback: speak each Card on its own and join them, which is choppier but
     always works.
     """
-    single = await narrate(cards, workdir / "narration.mp3")
+    single = await narrate(cards, workdir / "narration.mp3", locale)
     if single:
         return tighten(*single, workdir)
 
     logger.info("ใช้วิธีพูดทีละ card แทน (ขอบเขตประโยคไม่น่าเชื่อถือ)")
     parts = await asyncio.gather(
-        *(speak(_tts_text(c), workdir / f"card{i:02d}.mp3") for i, c in enumerate(cards))
+        *(speak(_tts_text(c, locale), workdir / f"card{i:02d}.mp3", locale)
+          for i, c in enumerate(cards))
     )
     starts, clock = [], 0.0
     for part in parts:
@@ -515,7 +524,8 @@ async def _ready(path: Path) -> Path:
 
 
 async def build(script: dict, workdir: Path,
-                supplied: dict[int, Path] | None = None) -> tuple[Path, dict]:
+                supplied: dict[int, Path] | None = None,
+                locale: str = locales.DEFAULT) -> tuple[Path, dict]:
     """Script → mp4, plus the parameters it was actually built with.
 
     The second return value is what the Manifest records: the workdir is wiped
@@ -530,7 +540,7 @@ async def build(script: dict, workdir: Path,
     supplied = {i: Path(p) for i, p in (supplied or {}).items() if Path(p).is_file()}
 
     narration, clips = await asyncio.gather(
-        _narration_track(cards, workdir),
+        _narration_track(cards, workdir, locale),
         asyncio.gather(
             *(_ready(supplied[i]) if i in supplied
               else footage.fetch(c.get("query", ""), workdir / f"broll{i:02d}.mp4")
@@ -570,7 +580,8 @@ async def build(script: dict, workdir: Path,
     details = {
         "seconds": round(audio_seconds(clip), 3),
         "frame": [W, H],
-        "voice": os.environ.get("TTS_VOICE", "th-TH-NiwatNeural"),
+        "locale": locale,
+        "voice": locales.voice(locale),
         "rate": os.environ.get("TTS_RATE", "+0%"),
         "pitch": os.environ.get("TTS_PITCH", "+0Hz"),
         "join_silence": JOIN_SILENCE,

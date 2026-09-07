@@ -19,7 +19,7 @@ os.environ.setdefault("TELEGRAM_CHAT_ID", "42")
 os.environ.setdefault("MIMO_API_KEY", "test-key")
 os.environ.setdefault("MIMO_BASE_URL", "https://example.invalid/v1")
 
-from app import (analytics, backfill, experiment, history, main, manifest, storyboard,  # noqa: E402
+from app import (analytics, backfill, experiment, history, locales, main, manifest, storyboard,  # noqa: E402
                  render, retention, script as script_gen, snapshots, trends,  # noqa: E402
                  youtube)
 
@@ -526,7 +526,7 @@ def test_a_bare_url_is_turned_away_before_reaching_the_model(monkeypatch):
 
     monkeypatch.setattr(main, "say", fake_say)
     monkeypatch.setattr(main.script_gen, "generate", never)
-    monkeypatch.setattr(main.manifest, "start", lambda topic: "test-id")
+    monkeypatch.setattr(main.manifest, "start", lambda topic, locale="th": "test-id")
     monkeypatch.setattr(main.manifest, "update", lambda *a, **kw: None)
     monkeypatch.setattr(main, "save_state", lambda state: None)
     state = {"mode": "idle", "auto_pick": "แตะไม่ได้"}
@@ -559,7 +559,7 @@ def test_the_force_prefix_gets_past_the_guard_and_is_not_part_of_the_topic(monke
 
     monkeypatch.setattr(main, "say", fake_say)
     monkeypatch.setattr(main.script_gen, "generate", fake_generate)
-    monkeypatch.setattr(main.manifest, "start", lambda topic: "test-id")
+    monkeypatch.setattr(main.manifest, "start", lambda topic, locale="th": "test-id")
     monkeypatch.setattr(main.manifest, "update", lambda *a, **kw: None)
     monkeypatch.setattr(main, "save_state", lambda state: None)
     asyncio.run(main.make_script(None, {"mode": "idle"}, "!ไทยชนะจีน 3-2"))
@@ -748,13 +748,13 @@ def test_upload_credits_the_clip_it_was_offered_for(tmp_path, monkeypatch):
     monkeypatch.setattr(manifest, "DIR", tmp_path / "clips")
     monkeypatch.setattr(history, "PATH", tmp_path / "history.json")
     monkeypatch.setattr(main, "save_state", lambda state: None)
-    monkeypatch.setattr(youtube, "configured", lambda: True)
+    monkeypatch.setattr(youtube, "configured", lambda locale="th": True)
 
     monkeypatch.setattr(main, "say", _nothing)
     monkeypatch.setattr(main, "send_video", _nothing)
     monkeypatch.setattr(main, "api", _nothing)
 
-    async def fake_upload(clip, script):
+    async def fake_upload(clip, script, locale="th"):
         return "vidA", "public"
 
     monkeypatch.setattr(youtube, "upload", fake_upload)
@@ -980,13 +980,13 @@ def test_a_revision_keeps_the_variant_it_was_born_with(tmp_path, monkeypatch):
 
     monkeypatch.setattr(analytics, "winning_examples", no_winners)
     monkeypatch.setattr(experiment, "assign",
-                        lambda: {"variant": "question", "explore": False,
-                                 "style": experiment.VARIANTS["question"]})
+                        lambda locale="th": {"variant": "question", "explore": False,
+                                             "style": experiment.VARIANTS["question"]})
 
     styles = []
 
     async def fake_generate(topic, previous=None, feedback="", avoid=None,
-                            winners=None, style=""):
+                            winners=None, style="", locale="th"):
         styles.append(style)
         return a_script()
 
@@ -1843,3 +1843,252 @@ def test_a_scene_message_carries_the_thai_and_the_english(monkeypatch):
 
     assert posted["parse_mode"] == "HTML"
     assert "หัวเรื่อง" in posted["text"] and "<pre>A cinematic 9:16 shot</pre>" in posted["text"]
+
+
+# --- Locales (English clips) -------------------------------------------------
+
+def an_english_card(text: str = "Docker logs eat disk") -> dict:
+    return {
+        "lines": [text],
+        "code": None,
+        "query": "server room racks",
+        "narration": "Your Docker logs are eating the whole disk.",
+        "spoken": "Your Docker logs are eating the whole disk.",
+    }
+
+
+def an_english_script(cards: int = 5) -> dict:
+    return {
+        "title": "Docker logs",
+        "description": "why they grow",
+        "hashtags": ["#devops"],
+        "category": "tech",
+        "cards": [an_english_card() for _ in range(cards)],
+    }
+
+
+def test_an_english_script_passes_the_english_rules():
+    assert script_gen.validate(an_english_script(), "en")["cards"]
+
+
+def test_the_latin_rule_is_mirrored_not_shared():
+    """Thai `spoken` may not contain Latin; English `spoken` may not contain
+    Thai. Applying either rule to the other Locale rejects every script."""
+    with pytest.raises(script_gen.ScriptError, match="ละติน"):
+        english = an_english_script()
+        script_gen.validate(english, "th")
+
+    thai = a_script()
+    with pytest.raises(script_gen.ScriptError, match="ไทย"):
+        script_gen.validate(thai, "en")
+
+
+def test_a_latin_line_that_clears_the_pixel_floor_is_still_rejected():
+    """Latin runs ~50px a character at full size against Thai's ~21, so a line
+    the renderer *can* draw at its 40px minimum is one nobody can read on a
+    phone. For English the character count is the binding rule."""
+    line = "This line is far too long to read"   # 33 characters
+    assert len(line) > script_gen.HARD_MAX_CHARS_PER_LINE - 2
+    assert script_gen._too_wide(line, "th") == 0, "the pixel floor lets it through"
+    assert script_gen._too_wide(line, "en") > 0, "the count must not"
+
+
+def test_the_english_voice_reads_an_english_clip(monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, rate="+0%", pitch="+0Hz"):
+            seen.update(text=text, voice=voice)
+
+        async def save(self, path):
+            pathlib.Path(path).write_bytes(b"")
+
+    monkeypatch.setattr(render.edge_tts, "Communicate", FakeCommunicate)
+    asyncio.run(render.speak("hello", tmp_path / "a.mp3", "en"))
+    assert seen["voice"] == "en-US-AndrewNeural"
+    asyncio.run(render.speak("ทดสอบ", tmp_path / "b.mp3"))
+    assert seen["voice"] == "th-TH-NiwatNeural", "Thai must keep its own voice"
+
+
+def test_a_hyphen_joins_english_words_and_disappears_in_thai():
+    """The Thai voice pauses on a hyphen and the transliteration does not need
+    it; English "state-of-the-art" without one is a word nobody can say."""
+    assert render._speakable("state-of-the-art", "en") == "state of the art"
+    assert render._speakable("เอฟ-สามสิบห้า", "th") == "เอฟสามสิบห้า"
+
+
+def test_an_english_clip_lands_in_its_own_folder(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main, "send_video", _nothing)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+    monkeypatch.setattr(main.youtube, "configured", lambda locale="th": False)
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+
+    state = {"locale": "en"}
+    asyncio.run(main.deliver(None, state, an_english_script(), clip))
+    assert list((tmp_path / "en").glob("*.mp4")), "English clips go to /output/en"
+    assert state["last_locale"] == "en"
+
+    state = {}
+    asyncio.run(main.deliver(None, state, a_script(), clip))
+    assert list(tmp_path.glob("*.mp4")), "Thai clips stay where they always were"
+    assert state["last_locale"] == "th"
+
+
+def test_a_parked_clip_keeps_its_own_locale(monkeypatch):
+    """A Parked Clip waits while the bot goes idle, so another Topic — in the
+    other Locale — can be started and finished before its Footage arrives."""
+    rendered = {}
+
+    async def fake_render(client, state, supplied=None):
+        rendered.update(locale=state.get("locale"))
+
+    monkeypatch.setattr(main, "do_render", fake_render)
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+
+    state = {
+        "mode": "idle",
+        # the live slots belong to a Thai clip started while the English one waits
+        "locale": "th",
+        "parked": {"clip_id": "x", "topic": "t", "script": an_english_script(),
+                   "locale": "en", "card": 0},
+    }
+    asyncio.run(main.render_parked(None, state))
+    assert rendered["locale"] == "en"
+
+
+def test_an_english_result_topic_is_turned_away(monkeypatch):
+    sent = []
+
+    async def fake_say(client, text, **kw):
+        sent.append(text)
+
+    async def never(*a, **kw):
+        raise AssertionError("a result topic reached the model")
+
+    monkeypatch.setattr(main, "say", fake_say)
+    monkeypatch.setattr(main.script_gen, "generate", never)
+    state = {"mode": "idle"}
+    asyncio.run(main.make_script(None, state, "who won the game last night", locale="en"))
+    assert sent and "ไม่รู้ผลแข่ง" in sent[0]
+    assert state == {"mode": "idle"}
+
+
+def test_an_english_clip_is_written_in_english_and_learns_from_nothing_thai(monkeypatch):
+    """The prompt must be the English one, and the Thai channel's titles must
+    not be fed to a model writing for a US audience."""
+    seen = {}
+
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+    monkeypatch.setattr(main.manifest, "start", lambda topic, locale="th": "test-id")
+    monkeypatch.setattr(main.manifest, "update", lambda *a, **kw: None)
+    monkeypatch.setattr(main.manifest, "add_script", lambda *a, **kw: None)
+    monkeypatch.setattr(main.history, "recent_titles", lambda: ["คลิปไทยเก่า"])
+
+    async def fake_generate(topic, previous=None, feedback="", avoid=None,
+                            winners=None, style="", locale="th"):
+        seen.update(locale=locale, avoid=avoid, style=style)
+        return an_english_script()
+
+    monkeypatch.setattr(main.script_gen, "generate", fake_generate)
+    state = {"mode": "idle"}
+    asyncio.run(main.make_script(None, state, "docker logs", locale="en"))
+
+    assert seen["locale"] == "en"
+    assert seen["avoid"] == [], "Thai titles must not reach the English prompt"
+    assert seen["style"] in list(experiment.VARIANTS_EN.values()) + [experiment.EXPLORE_CLAUSE_EN]
+    assert state["locale"] == "en"
+
+
+def test_the_english_prompt_is_written_in_english():
+    """Asking for an English script in Thai gets a translation, not writing."""
+    assert not script_gen.THAI.search(script_gen.system_prompt("en"))
+    assert not script_gen.THAI.search(script_gen.trends_prompt("en"))
+    assert script_gen.THAI.search(script_gen.system_prompt("th"))
+
+
+def test_an_unknown_locale_falls_back_to_thai():
+    """Manifests written before Locales existed carry no locale at all."""
+    assert locales.get(None)["code"] == "th"
+    assert locales.get("de")["code"] == "th"
+    assert main.output_dir(None) == main.OUTPUT_DIR
+
+
+def test_trends_asks_the_right_country(monkeypatch):
+    asked = []
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kw):
+            raise AssertionError("no network in tests")
+
+    async def fake_searches(client, geo="TH"):
+        asked.append(("rss", geo))
+        return []
+
+    async def fake_watching(client, region="TH"):
+        asked.append(("yt", region))
+        return []
+
+    monkeypatch.setattr(trends.httpx, "AsyncClient", lambda **kw: FakeClient())
+    monkeypatch.setattr(trends, "searches", fake_searches)
+    monkeypatch.setattr(trends, "watching", fake_watching)
+
+    asyncio.run(trends.collect("en"))
+    assert asked == [("rss", "US"), ("yt", "US")]
+    asked.clear()
+    asyncio.run(trends.collect())
+    assert asked == [("rss", "TH"), ("yt", "TH")]
+
+
+def test_an_english_clip_never_uploads_through_the_thai_channel(monkeypatch):
+    """Two channels (docs/adr/0008), and no shared fallback: without English
+    credentials the button must not appear, and the upload must refuse rather
+    than reach for the Thai channel's refresh token."""
+    for name in ("CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN"):
+        monkeypatch.setenv(f"YOUTUBE_{name}", "thai-channel")
+        monkeypatch.delenv(f"YOUTUBE_EN_{name}", raising=False)
+
+    assert youtube.configured("th")
+    assert not youtube.configured("en")
+    with pytest.raises(youtube.UploadError, match="อังกฤษ"):
+        asyncio.run(youtube.upload(pathlib.Path("/nonexistent.mp4"), an_english_script(), "en"))
+
+
+def test_the_upload_uses_the_locale_the_clip_was_delivered_with(monkeypatch, tmp_path):
+    seen = {}
+
+    async def fake_upload(clip, script, locale=locales.DEFAULT):
+        seen["upload"] = locale
+        return "vid123", "public"
+
+    async def fake_captions(video_id, srt, locale=locales.DEFAULT):
+        seen["captions"] = locale
+
+    monkeypatch.setattr(main.youtube, "upload", fake_upload)
+    monkeypatch.setattr(main.youtube, "add_captions", fake_captions)
+    monkeypatch.setattr(main.history, "record", lambda *a, **kw: seen.update(history=kw or a))
+    monkeypatch.setattr(main.manifest, "update", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main, "retire_buttons", _nothing)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    srt = tmp_path / "clip.srt"
+    srt.write_text("1\n")
+    state = {"last_clip": str(clip), "last_srt": str(srt),
+             "last_script": an_english_script(), "last_locale": "en"}
+    asyncio.run(main.do_upload(None, state))
+
+    assert seen["upload"] == "en"
+    assert seen["captions"] == "en", "an English clip must not be tagged with Thai subtitles"
