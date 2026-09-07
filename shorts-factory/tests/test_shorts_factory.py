@@ -6,6 +6,7 @@ Run inside the image, where Raqm and the Thai fonts exist:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import pathlib
@@ -986,7 +987,7 @@ def test_a_revision_keeps_the_variant_it_was_born_with(tmp_path, monkeypatch):
     styles = []
 
     async def fake_generate(topic, previous=None, feedback="", avoid=None,
-                            winners=None, style="", locale="th"):
+                            winners=None, style="", locale="th", sibling=None):
         styles.append(style)
         return a_script()
 
@@ -1992,7 +1993,7 @@ def test_an_english_clip_is_written_in_english_and_learns_from_nothing_thai(monk
                         lambda locale=None: ["คลิปไทยเก่า"] if locale == "th" else [])
 
     async def fake_generate(topic, previous=None, feedback="", avoid=None,
-                            winners=None, style="", locale="th"):
+                            winners=None, style="", locale="th", sibling=None):
         seen.update(locale=locale, avoid=avoid, style=style)
         return an_english_script()
 
@@ -2246,3 +2247,176 @@ def test_the_retention_curve_is_read_from_the_clips_own_channel(monkeypatch):
     ])
     asyncio.run(main.on_retention(None, "english-vid"))
     assert asked == {"english-vid": "en"}
+
+
+# --- Locale pairs: one Topic, both channels ---------------------------------
+
+def test_a_pair_starts_in_thai_and_remembers_the_topic(monkeypatch):
+    calls = []
+
+    async def fake_make_script(client, state, topic, **kw):
+        calls.append((topic, kw.get("locale")))
+
+    monkeypatch.setattr(main, "make_script", fake_make_script)
+    monkeypatch.setattr(main, "say", _nothing)
+    state = {"mode": "idle"}
+    asyncio.run(main.start_pair(None, state, "ทำไม log บวม"))
+
+    assert calls == [("ทำไม log บวม", "th")], "the human reviews Thai first"
+    assert state["pair"]["topic"] == "ทำไม log บวม"
+
+
+def test_the_english_half_is_written_from_the_thai_one_not_translated(monkeypatch):
+    seen = {}
+
+    async def fake_make_script(client, state, topic, **kw):
+        seen.update(topic=topic, **kw)
+
+    monkeypatch.setattr(main, "make_script", fake_make_script)
+    monkeypatch.setattr(main, "say", _nothing)
+    approved = a_script()
+    state = {"pair": {"topic": "ทำไม log บวม", "pair_id": "clip-th"},
+             "last_script": approved}
+    asyncio.run(main.continue_pair(None, state))
+
+    assert seen["locale"] == "en" and seen["topic"] == "ทำไม log บวม"
+    assert seen["sibling"] == approved, "the approved Thai script is context"
+    assert seen["pair_id"] == "clip-th"
+    assert "pair" not in state, "the queue is consumed, not left to fire twice"
+
+
+def test_the_sibling_note_asks_for_a_rewrite_not_a_translation():
+    note = script_gen._sibling_note(a_script(), "en")
+    assert "do not translate" in note.lower()
+    assert "อ่านออกเสียงประโยคนี้" in note, "the other half's narration is the context"
+
+
+def test_a_delivered_clip_queues_the_other_half(monkeypatch, tmp_path):
+    spawned = []
+
+    async def fake_build(script, workdir, supplied=None, locale="th"):
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"x")
+        return clip, {}
+
+    async def fake_deliver(client, state, script, clip):
+        state["last_script"] = script
+
+    monkeypatch.setattr(main.render, "build", fake_build)
+    monkeypatch.setattr(main, "deliver", fake_deliver)
+    monkeypatch.setattr(main, "close_prompt", _nothing)
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+    monkeypatch.setattr(main.manifest, "update", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "spawn", lambda coro, label: spawned.append(label) or coro.close())
+
+    state = {"script": a_script(), "locale": "th",
+             "pair": {"topic": "หัวข้อ", "pair_id": "clip-th"}}
+    asyncio.run(main.do_render(None, state))
+    assert spawned == ["continue_pair"]
+
+
+def test_a_failed_render_cancels_the_other_half(monkeypatch):
+    said = []
+
+    async def boom(script, workdir, supplied=None, locale="th"):
+        raise RuntimeError("ffmpeg ล้ม")
+
+    async def fake_say(client, text, **kw):
+        said.append(text)
+
+    monkeypatch.setattr(main.render, "build", boom)
+    monkeypatch.setattr(main, "close_prompt", _nothing)
+    monkeypatch.setattr(main, "say", fake_say)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+    monkeypatch.setattr(main.manifest, "update", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "spawn", lambda coro, label: coro.close())
+
+    state = {"script": a_script(), "locale": "th", "pair": {"topic": "หัวข้อ"}}
+    asyncio.run(main.do_render(None, state))
+    assert "pair" not in state
+    assert any("ยกเลิกภาษาอังกฤษ" in text for text in said)
+
+
+def test_both_halves_of_a_pair_carry_the_same_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(manifest, "DIR", tmp_path / "clips")
+    monkeypatch.setattr(main, "close_prompt", _nothing)
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+    monkeypatch.setattr(main.history, "recent_titles", lambda locale=None: [])
+
+    async def no_winners(limit=3, locale="th"):
+        return []
+
+    monkeypatch.setattr(main.analytics, "winning_examples", no_winners)
+
+    async def fake_generate(topic, previous=None, feedback="", avoid=None,
+                            winners=None, style="", locale="th", sibling=None):
+        return a_script() if locale == "th" else an_english_script()
+
+    monkeypatch.setattr(main.script_gen, "generate", fake_generate)
+
+    state = {"mode": "idle", "pair": {"topic": "หัวข้อ"}}
+    asyncio.run(main.make_script(None, state, "หัวข้อ", locale="th"))
+    first = state["clip_id"]
+    asyncio.run(main.make_script(None, state, "หัวข้อ", locale="en",
+                                 pair_id=state["pair"]["pair_id"]))
+
+    records = {r["id"]: r for r in manifest.load_all()}
+    assert len(records) == 2
+    assert {r["pair_id"] for r in records.values()} == {first}
+    assert records[first]["locale"] == "th"
+
+
+def test_the_trends_list_offers_both_a_thai_and_a_pair_row():
+    keyboard = main.topics_keyboard([{"topic": "a"}, {"topic": "b"}], "stamp")
+    rows = keyboard["inline_keyboard"]
+    assert [b["callback_data"] for b in rows[0]] == ["pick:stamp:0", "pick:stamp:1"]
+    assert [b["callback_data"] for b in rows[1]] == ["pair:stamp:0", "pair:stamp:1"]
+
+
+def test_a_pair_button_credits_the_same_list_a_number_button_does():
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    state = {"suggested": [{"topic": "หนึ่ง"}, {"topic": "สอง"}], "suggested_at": stamp}
+    assert main.picked(state, f"pick:{stamp}:1") == "สอง"
+    assert main.picked(state, f"pair:{stamp}:1") == "สอง"
+    assert main.picked(state, "pair:2020-01-01T00:00:00:1") is None
+
+
+def test_each_finished_clip_keeps_its_own_upload_button(monkeypatch, tmp_path):
+    """Two clips minutes apart — a pair does exactly that — and the older
+    button must still upload the clip it was sent under."""
+    monkeypatch.setattr(main, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+    monkeypatch.setattr(main.youtube, "configured", lambda locale="th": True)
+
+    keyboards = []
+
+    async def fake_send_video(client, path, caption, **kw):
+        keyboards.append(kw.get("reply_markup"))
+        return {"message_id": len(keyboards)}
+
+    monkeypatch.setattr(main, "send_video", fake_send_video)
+    clip = tmp_path / "rendered.mp4"
+    clip.write_bytes(b"x")
+
+    state = {"locale": "th", "clip_id": "clip-th", "topic": "หัวข้อ"}
+    asyncio.run(main.deliver(None, state, a_script(), clip))
+    state.update(locale="en", clip_id="clip-en", topic="topic")
+    asyncio.run(main.deliver(None, state, an_english_script(), clip))
+
+    assert [k["inline_keyboard"][0][0]["callback_data"] for k in keyboards] == [
+        "upload:clip-th", "upload:clip-en"]
+    assert set(state["uploads"]) == {"clip-th", "clip-en"}
+
+    first = main._to_upload(state, "clip-th")
+    assert first["locale"] == "th" and first["script"]["title"] == "ทดสอบ"
+
+
+def test_an_upload_button_without_an_id_still_means_the_last_clip():
+    """Buttons sent before ids travelled in the callback data are still live."""
+    state = {"last_clip": "/tmp/a.mp4", "last_script": a_script(),
+             "last_topic": "หัวข้อ", "last_locale": "th", "uploads": {}}
+    assert main._to_upload(state, None)["clip"] == "/tmp/a.mp4"
+    assert main._to_upload({"uploads": {}}, None) is None

@@ -162,6 +162,33 @@ so English clips render to `/volume1/shorts/en` and are uploaded by hand, and
 there are no English numbers to report at all. The handoff is written out
 under [Uploading to YouTube](#uploading-to-youtube).
 
+## Both languages from one Topic
+
+`/both <topic>`, or the 🌏 row under a `/trends` list, makes the same Topic in
+both Locales. Thai is written first and reviewed exactly as any other clip;
+once its Clip is delivered the bot writes the English half on its own and
+hands it back for review. One at a time rather than both at once — two Scripts
+on screen would have to be read side by side on a phone, and every revision
+would have to say which one it meant.
+
+The English half is **written, not translated**. The approved Thai Script is
+handed to the model as context — same angle, same facts — but English lines are
+capped at 24 characters against Thai's 34 and the hooks that land differ, so a
+translation comes back overflowing and flat. Both halves record the Thai half's
+Clip id as `pair_id`, which is what makes "the same Topic, two audiences"
+answerable later.
+
+Either half failing stops there: a render that fails, or a Thai script you
+discard with 🗑, cancels the English half and says so. The Variant is still
+drawn independently for each half — locking them together would halve how fast
+each channel collects its own arms.
+
+The numbered buttons under `/trends` are unchanged and still make one Thai
+clip; pairing is opt-in per Topic, because a Thai search spike is often about
+something a US audience has no reason to care about, and a pair costs two
+Scripts and two renders. The automatic rounds (`TRENDS_HOURS`, the unattended
+pick) stay Thai-only for the same reason.
+
 ## Pipeline
 
 ```
@@ -427,6 +454,13 @@ rows.
 Once configured, the bot puts an "อัปโหลดขึ้น YouTube" button under each
 finished clip. Publishing is the one step that stays behind a tap: it goes
 outward and cannot be taken back quietly.
+
+Each button carries the id of the Clip it was sent under, so several finished
+clips can wait with live buttons at once — a Locale pair produces two minutes
+apart — and pressing the older one uploads the clip it belongs to, through
+that clip's own channel. (Buttons sent before ids travelled in the callback
+data still mean "the last thing rendered", which is what they meant when they
+were sent.)
 
 Set it up once with `python3 scripts/youtube_auth.py <client_id> <client_secret>`
 — that file's docstring lists the Google Cloud console steps. The consent screen

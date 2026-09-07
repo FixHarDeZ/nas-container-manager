@@ -1338,3 +1338,38 @@ pytest shorts-factory tests/`), including new coverage for per-channel history
 filtering, per-channel Gate counting, per-channel snapshot pulls (including a
 channel with no credentials and a channel that fails), and `/retention`
 reading the locale off the Manifest.
+
+## 2026-09-07 — one Topic, both channels
+
+Asked for: pick a topic off `/trends` once, review both scripts, render both,
+upload to the two channels separately.
+
+Shape chosen after grilling: **sequential, not simultaneous.** `/both <topic>`
+(or the new 🌏 row under a `/trends` list) sets `state["pair"]`, writes the
+Thai half and hands it to the existing review flow untouched. `do_render()`
+sets a `delivered` flag and, outside its `finally`, spawns `continue_pair()`,
+which writes the English half from an idle bot exactly as a typed Topic would.
+Two scripts on screen at once would have to be read side by side on a phone,
+and every revision would have to name which one it meant.
+
+- The English half is written natively with the approved Thai Script passed as
+  context (`script.generate(sibling=...)` → `_sibling_note()`), explicitly
+  told not to translate: 24 characters a line against Thai's 34, and hooks
+  that do not carry across.
+- `pair_id` on both Manifests is the Thai half's clip id.
+- A render failure or a 🗑 on the first half pops `state["pair"]` and says so
+  in the chat; a generate failure does the same.
+- Variants stay independently drawn per half. Locking them together would make
+  each channel collect its two arms half as fast.
+- The numbered `/trends` buttons and both automatic rounds are unchanged and
+  still Thai-only — a Thai search spike is usually not a US topic, and an
+  unattended round with nobody reviewing should not double its output.
+
+**Bug fixed on the way, older than this feature:** the upload button carried
+no Clip id, and `deliver()` kept a single `last_*` slot. Render two clips back
+to back — which a pair does by design — and the first clip's button uploaded
+the second clip. Buttons now carry `upload:<clip_id>` and `deliver()` records
+each finished Clip in `state["uploads"]` (capped at 10). Buttons sent before
+this still mean "the last clip", which is what they meant when they were sent.
+
+Tests: 179 passing in the container.

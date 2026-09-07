@@ -34,6 +34,8 @@ CHAT_ID = int(os.environ["TELEGRAM_CHAT_ID"])
 API = f"https://api.telegram.org/bot{TOKEN}"
 
 RENDER_CB, DISCARD_CB, UPLOAD_CB = "render", "discard", "upload"
+# 🌏 under a /trends list: the same Topic in both Locales, one after the other.
+PAIR_CB = "pair"
 # 🎨 on a Script: write the Flow Prompt and park the Clip. `parked_render` is
 # the button that comes back once the human has sent the Footage in.
 FLOW_CB, PARK_RENDER_CB = "flow", "parked_render"
@@ -75,9 +77,21 @@ TELEGRAM_FILE_LIMIT = 20 * 1024 * 1024
 # sendMessage refuses anything longer; a Storyboard Prompt that overruns is
 # sent as a .txt file rather than chopped into pieces nobody can paste.
 TELEGRAM_TEXT_LIMIT = 4096
-UPLOAD_KEYBOARD = {
-    "inline_keyboard": [[{"text": "⬆️ อัปโหลดขึ้น YouTube", "callback_data": UPLOAD_CB}]]
-}
+# How many finished Clips keep a live upload button. They are only a path and
+# a Script each, but state.json is rewritten on every tick.
+MAX_PENDING_UPLOADS = 10
+def upload_keyboard(clip_id: str | None) -> dict:
+    """The upload button for one specific Clip.
+
+    The Clip id travels in the callback data because this button outlives the
+    Topic that made it: two Clips can be rendered back to back — a Locale pair
+    does exactly that — and a button that meant "whatever was rendered last"
+    would publish the wrong one.
+    """
+    data = f"{UPLOAD_CB}:{clip_id}" if clip_id else UPLOAD_CB
+    return {"inline_keyboard": [[
+        {"text": "⬆️ อัปโหลดขึ้น YouTube", "callback_data": data}
+    ]]}
 REVIEW_KEYBOARD = {
     "inline_keyboard": [
         [
@@ -138,6 +152,14 @@ HELP = """🎬 shorts-factory
    ตัวหนังสือละตินกว้างกว่าไทยเท่าตัว บรรทัดบนจอเลยสั้นกว่า (24 ตัวอักษร)
    ยังอัปขึ้น YouTube จากบอทไม่ได้จนกว่าจะตั้งช่องที่สองเสร็จ — ตอนนี้เอาไฟล์ไปอัปเอง
    ปุ่มทุกปุ่มและข้อความของบอทยังเป็นไทยเหมือนเดิม
+
+/both <หัวข้อ> — เรื่องเดียวกัน ทำทั้งไทยและอังกฤษ
+   ทำไทยก่อน รีวิว/แก้/กด render ตามปกติ พอคลิปไทยเสร็จบอทเขียนอังกฤษต่อเอง
+   แล้วให้รีวิวอีกรอบ — **คนละสคริปต์ ไม่ใช่คำแปล** (บรรทัดอังกฤษสั้นกว่า มุก hook คนละแบบ)
+   แต่ส่งสคริปต์ไทยที่อนุมัติแล้วเข้าไปเป็นตัวอย่าง ให้เล่ามุมเดียวกัน
+   ในลิสต์ /trends กดปุ่มแถวล่าง 🌏1 🌏2 ... ได้เหมือนกัน (แถวบน = ไทยอย่างเดียวเหมือนเดิม)
+   คลิปไทย render ไม่ผ่าน หรือกด 🗑 ทิ้ง = ยกเลิกอังกฤษด้วย
+   อัปขึ้น YouTube ยังกดเอง ปุ่มแยกกันคนละคลิป คนละช่อง
 
 /redo — render คลิปล่าสุดซ้ำ ด้วยสคริปต์เดิมเป๊ะ ไม่ต้องรอเขียนใหม่
    ใช้ตอนแก้เสียงอ่านด้วย /say แล้วอยากได้ไฟล์ใหม่ (เพลงประกอบสุ่มใหม่ด้วย)
@@ -357,15 +379,31 @@ async def deliver(client: httpx.AsyncClient, state: dict, script: dict, clip: Pa
     # Per Locale: no credentials for this Locale's channel means no button,
     # rather than a button that would publish to the other channel.
     offer_upload = youtube.configured(locale)
+    clip_id = state.get("clip_id")
     sent = await send_video(
         client, final, metadata_text(script),
-        **({"reply_markup": UPLOAD_KEYBOARD} if offer_upload else {}),
+        **({"reply_markup": upload_keyboard(clip_id)} if offer_upload else {}),
     )
     await say(client, f"✅ เสร็จแล้ว เก็บไว้ที่ {final}")
     # The upload button outlives this Topic — the human can send a new one and
     # press upload on an older clip afterwards. Everything the upload needs is
     # snapshotted here for that reason; reading the live `clip_id`/`topic`
     # would stamp the new Topic's Manifest with the old clip's video id.
+    # Everything an upload needs, kept per Clip rather than in one "last"
+    # slot: a Locale pair renders two Clips minutes apart and both buttons
+    # stay live. Trimmed so state.json cannot grow without bound.
+    pending = state.setdefault("uploads", {})
+    if clip_id and offer_upload:
+        pending[clip_id] = {
+            "clip": str(final),
+            "srt": str(final_srt) if srt.exists() else None,
+            "script": script,
+            "topic": state.get("topic"),
+            "locale": locale,
+            "message_id": (sent or {}).get("message_id"),
+        }
+        for stale in sorted(pending)[:-MAX_PENDING_UPLOADS]:
+            pending.pop(stale, None)
     state.update(
         last_clip=str(final),
         last_srt=str(final_srt) if srt.exists() else None,
@@ -436,7 +474,9 @@ def result_shaped(topic: str) -> bool:
 
 async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
                       feedback: str = "", auto: bool = False,
-                      locale: str | None = None) -> None:
+                      locale: str | None = None,
+                      sibling: dict | None = None,
+                      pair_id: str | None = None) -> None:
     previous = state.get("script") if feedback else None
     # A revision belongs to the Clip already open, and that Clip's Locale is
     # not up for renegotiation halfway through.
@@ -472,6 +512,14 @@ async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
     if previous is None:
         state["locale"] = locale
         state["clip_id"] = manifest.start(topic, locale)
+        # Both halves of a pair point at the Thai half's id, so "the same Topic
+        # in two languages" is answerable later without matching on text.
+        pair = state.get("pair")
+        if pair is not None and not pair.get("pair_id"):
+            pair["pair_id"] = state["clip_id"]
+        pair_id = pair_id or (pair or {}).get("pair_id")
+        if pair_id:
+            manifest.update(state["clip_id"], pair_id=pair_id)
         # Assigned before the Script exists and never re-rolled: a Script
         # rewritten on feedback keeps the Variant it was born with, or the
         # human's taste would quietly pick the winner (docs/adr/0004).
@@ -505,6 +553,7 @@ async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
             winners=await analytics.winning_examples(locale=locale),
             style=state.get("style", ""),
             locale=locale,
+            sibling=sibling,
         )
     except Exception as exc:
         logger.exception("generate failed")
@@ -522,6 +571,7 @@ async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
                             error=str(exc)[:500])
             state.update(mode="idle", script=None, clip_id=None, style="",
                          locale=locales.DEFAULT)
+            state.pop("pair", None)
         save_state(state)
         await say(client, f"เขียนสคริปต์ไม่สำเร็จ: {exc}")
         return
@@ -551,6 +601,7 @@ async def do_render(client: httpx.AsyncClient, state: dict,
     save_state(state)
 
     workdir = WORK_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
+    delivered = False
     try:
         clip, details = await render.build(
             script, workdir, supplied=supplied,
@@ -558,16 +609,26 @@ async def do_render(client: httpx.AsyncClient, state: dict,
         )
         manifest.update(state.get("clip_id"), outcome="rendered", render=details)
         await deliver(client, state, script, clip)
+        delivered = True
     except Exception as exc:
         logger.exception("render failed")
         manifest.update(state.get("clip_id"), outcome="render_failed", error=str(exc)[:500])
         await say(client, f"render ล้มเหลว: {exc}")
+        # The other half of a pair is not written for a Clip that never
+        # existed: a failure here is usually the topic or the model, and it
+        # would fail the same way again in the other language.
+        if state.pop("pair", None):
+            await say(client, "ยกเลิกภาษาอังกฤษของหัวข้อนี้ด้วย (คลิปแรกยัง render ไม่ผ่าน)")
     finally:
         # Intermediate PNG/audio dwarf the mp4; never leave them behind.
         shutil.rmtree(workdir, ignore_errors=True)
         state.update(mode="idle", script=None, topic=None, clip_id=None, style="",
                      locale=locales.DEFAULT)
         save_state(state)
+    # Outside the finally: the second half starts from an idle bot, exactly as
+    # a Topic typed by hand would, and only once the first Clip is really out.
+    if delivered and state.get("pair"):
+        spawn(continue_pair(client, state), "continue_pair")
 
 
 async def retire_buttons(client: httpx.AsyncClient, message_id: int | None) -> None:
@@ -817,18 +878,44 @@ async def on_long_storyboard(client: httpx.AsyncClient, brief: str) -> None:
     await send_storyboard(client, board)
 
 
-async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
-    clip = Path(state.get("last_clip") or "")
-    script = state.get("last_script")
-    # Snapshotted at deliver(): the live slots may belong to a Clip in the
-    # other Locale by now, and this upload is outward-facing and final.
-    locale = state.get("last_locale", locales.DEFAULT)
+def _to_upload(state: dict, clip_id: str | None) -> dict | None:
+    """The Clip a pressed upload button belongs to.
+
+    Buttons sent before Clip ids travelled in the callback data carry no id at
+    all; those still mean "the last thing rendered", which is what they meant
+    when they were sent.
+    """
+    pending = state.get("uploads") or {}
+    if clip_id:
+        return pending.get(clip_id)
+    if not state.get("last_script"):
+        return None
+    return {
+        "clip": state.get("last_clip"),
+        "srt": state.get("last_srt"),
+        "script": state.get("last_script"),
+        "topic": state.get("last_topic"),
+        # Snapshotted at deliver(): the live slots may belong to a Clip in the
+        # other Locale by now, and this upload is outward-facing and final.
+        "locale": state.get("last_locale", locales.DEFAULT),
+        "message_id": state.get("upload_message_id"),
+    }
+
+
+async def do_upload(client: httpx.AsyncClient, state: dict,
+                    clip_id: str | None = None) -> None:
+    entry = _to_upload(state, clip_id)
+    clip = Path((entry or {}).get("clip") or "")
+    script = (entry or {}).get("script")
+    locale = (entry or {}).get("locale", locales.DEFAULT)
     if not script or not clip.is_file():
         await say(client, "ไม่เจอคลิปที่จะอัปแล้ว (บอทน่าจะรีสตาร์ทไป) ลอง render ใหม่")
         return
 
-    await retire_buttons(client, state.get("upload_message_id"))
-    state["upload_message_id"] = None
+    await retire_buttons(client, entry.get("message_id"))
+    entry["message_id"] = None
+    if clip_id is None:
+        state["upload_message_id"] = None
     save_state(state)
     await say(client, "⬆️ กำลังอัปโหลด...")
 
@@ -853,7 +940,7 @@ async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
             thumbnail_note = f"\n⚠️ ตั้งปกไม่ได้: {exc} (คลิปขึ้นแล้ว ตั้งเองใน Studio ได้)"
 
     captions_note = ""
-    srt = Path(state.get("last_srt") or "")
+    srt = Path(entry.get("srt") or "")
     if srt.is_file():
         try:
             await youtube.add_captions(video_id, srt, locale)
@@ -862,9 +949,9 @@ async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
             logger.exception("captions failed")
             captions_note = f"\n⚠️ ใส่ซับไม่ได้: {exc}"
 
-    history.record(video_id, script, state.get("last_topic") or "", locale)
+    history.record(video_id, script, entry.get("topic") or "", locale)
     manifest.update(
-        state.get("last_clip_id"),
+        clip_id or state.get("last_clip_id"),
         published=True,
         video_id=video_id,
         privacy=privacy,
@@ -884,10 +971,14 @@ async def do_upload(client: httpx.AsyncClient, state: dict) -> None:
         # Google forces uploads from an unaudited project to private.
         note += "\n⚠️ YouTube เปลี่ยนสถานะเอง — โปรเจกต์ยังไม่ผ่าน API audit"
     await say(client, note)
-    state.update(
-        last_clip=None, last_srt=None, last_script=None,
-        last_clip_id=None, last_topic=None,
-    )
+    (state.get("uploads") or {}).pop(clip_id, None)
+    # The "last rendered" slots feed /redo as well as an id-less button, so
+    # they are only cleared when it was that Clip that just went out.
+    if clip_id in (None, state.get("last_clip_id")):
+        state.update(
+            last_clip=None, last_srt=None, last_script=None,
+            last_clip_id=None, last_topic=None,
+        )
     save_state(state)
 
 
@@ -1025,11 +1116,19 @@ async def auto_pick(client: httpx.AsyncClient, state: dict) -> None:
 
 
 def topics_keyboard(topics: list[dict], stamp: str) -> dict:
-    """One button per suggestion, each carrying the list it belongs to."""
-    return {"inline_keyboard": [[
-        {"text": str(i), "callback_data": f"{PICK_CB}:{stamp}:{i - 1}"}
-        for i in range(1, len(topics) + 1)
-    ]]}
+    """One button per suggestion, each carrying the list it belongs to.
+
+    Two rows: the numbers make one Clip in Thai, the 🌏 row makes the same
+    Topic in both Locales. Deliberately not the default — a Thai search spike
+    is often about something a US audience has no reason to care about, and a
+    pair costs two Scripts and two renders.
+    """
+    return {"inline_keyboard": [
+        [{"text": str(i), "callback_data": f"{PICK_CB}:{stamp}:{i - 1}"}
+         for i in range(1, len(topics) + 1)],
+        [{"text": f"🌏{i}", "callback_data": f"{PAIR_CB}:{stamp}:{i - 1}"}
+         for i in range(1, len(topics) + 1)],
+    ]}
 
 
 def picked(state: dict, data: str) -> str | None:
@@ -1040,7 +1139,8 @@ def picked(state: dict, data: str) -> str | None:
     nobody chose. The list's timestamp travels in the callback data and a tap
     on a superseded message is refused instead.
     """
-    stamp, _, index = data[len(PICK_CB) + 1:].rpartition(":")
+    prefix, _, rest = data.partition(":")
+    stamp, _, index = rest.rpartition(":")
     if not stamp or stamp != state.get("suggested_at"):
         return None
     # Same expiry the recorder uses: past it, trend_origin() refuses to credit
@@ -1180,6 +1280,26 @@ async def on_english(client: httpx.AsyncClient, state: dict, topic: str) -> None
     spawn(make_script(client, state, topic, locale="en"), "make_script")
 
 
+async def on_both(client: httpx.AsyncClient, state: dict, topic: str) -> None:
+    """/both <topic>: the same Topic in Thai and then in English."""
+    if not topic:
+        await say(client, (
+            "พิมพ์หัวข้อต่อท้ายด้วยนะ เช่น\n/both ทำไม log ของ Docker กินดิสก์จนเต็ม\n\n"
+            "บอทจะทำคลิปไทยก่อน แล้วค่อยเขียนอังกฤษของเรื่องเดียวกันต่อให้เอง "
+            "(คนละสคริปต์ คนละช่อง ไม่ใช่คำแปล)"
+        ))
+        return
+    mode = state.get("mode", "idle")
+    if mode in BUSY_MODES:
+        job = "เขียนสคริปต์" if mode == "writing" else "render"
+        await say(client, f"⏳ กำลัง{job}อยู่ รอให้เสร็จก่อนนะ")
+        return
+    if mode == "review":
+        await say(client, "ยังมีสคริปต์ค้างรีวิวอยู่ กด 🎬 หรือ 🗑 ให้อันนั้นก่อนนะ")
+        return
+    spawn(start_pair(client, state, topic), "start_pair")
+
+
 async def on_text(client: httpx.AsyncClient, state: dict, text: str) -> None:
     if text.startswith("/help") or text.startswith("/start"):
         # No parse_mode: Telegram's Markdown rejects unbalanced markers and
@@ -1230,6 +1350,9 @@ async def on_text(client: httpx.AsyncClient, state: dict, text: str) -> None:
     if text.startswith("/en"):
         await on_english(client, state, text[len("/en"):].strip())
         return
+    if text.startswith("/both"):
+        await on_both(client, state, text[len("/both"):].strip())
+        return
     # A mistyped command is not a Topic. Letting it fall through spends minutes
     # of model time and leaves a Manifest named after the typo — /stat did that
     # on 2026-08-30, /redo on 2026-08-31.
@@ -1255,6 +1378,9 @@ async def on_callback(client: httpx.AsyncClient, state: dict, query: dict) -> No
     if data.startswith(f"{PICK_CB}:"):
         await on_pick(client, state, data)
         return
+    if data.startswith(f"{PAIR_CB}:"):
+        await on_pick(client, state, data, pair=True)
+        return
     if data.startswith(f"{CANCEL_CB}:"):
         # Above the mode guard below: the bot is idle while a list is pending,
         # so that guard would drop this tap without a word.
@@ -1265,10 +1391,13 @@ async def on_callback(client: httpx.AsyncClient, state: dict, query: dict) -> No
         # idle, so that guard would swallow the tap without a word.
         spawn(render_parked(client, state), "render_parked")
         return
-    if query.get("data") != UPLOAD_CB and state.get("mode") != "review":
+    if not data.startswith(UPLOAD_CB) and state.get("mode") != "review":
         return
-    if query.get("data") == UPLOAD_CB:
-        spawn(do_upload(client, state), "do_upload")
+    if data == UPLOAD_CB or data.startswith(f"{UPLOAD_CB}:"):
+        # An upload button carries the Clip it was sent under; only the oldest
+        # buttons, sent before that, carry nothing and mean "the last one".
+        clip_id = data[len(UPLOAD_CB) + 1:] or None
+        spawn(do_upload(client, state, clip_id), "do_upload")
         return
     if query.get("data") == RENDER_CB:
         spawn(do_render(client, state), "do_render")
@@ -1284,9 +1413,13 @@ async def on_callback(client: httpx.AsyncClient, state: dict, query: dict) -> No
     elif query.get("data") == DISCARD_CB:
         await close_prompt(client, state.get("message_id"), "🗑 ทิ้งสคริปต์แล้ว")
         manifest.update(state.get("clip_id"), outcome="discarded")
+        dropped_pair = state.pop("pair", None)
         state.update(mode="idle", script=None, topic=None, message_id=None, clip_id=None, style="")
         save_state(state)
-        await say(client, "ทิ้งแล้ว ส่งหัวข้อใหม่มาได้เลย")
+        note = "ทิ้งแล้ว ส่งหัวข้อใหม่มาได้เลย"
+        if dropped_pair:
+            note += "\n(ยกเลิกภาษาอังกฤษของหัวข้อนี้ด้วย)"
+        await say(client, note)
 
 
 async def on_cancel(client: httpx.AsyncClient, state: dict, stamp: str) -> None:
@@ -1309,7 +1442,38 @@ async def on_cancel(client: httpx.AsyncClient, state: dict, stamp: str) -> None:
     await say(client, "ได้ ไม่ทำรอบนี้" if cancelled else "รอบนี้ยกเลิกไปแล้ว")
 
 
-async def on_pick(client: httpx.AsyncClient, state: dict, data: str) -> None:
+async def start_pair(client: httpx.AsyncClient, state: dict, topic: str) -> None:
+    """Make this Topic in both Locales, Thai first.
+
+    One at a time rather than both at once: two Scripts on screen would have to
+    be read side by side on a phone and every revision would have to name which
+    one it meant. The English half is queued and starts on its own once the
+    Thai Clip is delivered, so the review, the buttons and the render path are
+    the ones that already exist.
+    """
+    state["pair"] = {"topic": topic, "waiting_for": locales.DEFAULT,
+                     "created_at": datetime.now().isoformat(timespec="seconds")}
+    await say(client, (
+        f"🌏 ทำ 2 ภาษา: {topic}\n"
+        "เริ่มจากไทยก่อน — รีวิว/แก้/กด render ตามปกติ "
+        "พอคลิปไทยเสร็จ บอทจะเขียนอังกฤษต่อให้เองโดยเล่าเรื่องเดียวกัน"
+    ))
+    await make_script(client, state, topic, locale=locales.DEFAULT)
+
+
+async def continue_pair(client: httpx.AsyncClient, state: dict) -> None:
+    """The Thai half is delivered; write the English one from the same angle."""
+    pair = state.pop("pair", None)
+    if not pair:
+        return
+    sibling = state.get("last_script")
+    await say(client, "🌏 ต่อภาษาอังกฤษของหัวข้อเดิม กำลังเขียนสคริปต์...")
+    await make_script(client, state, pair["topic"], locale="en", sibling=sibling,
+                      pair_id=pair.get("pair_id"))
+
+
+async def on_pick(client: httpx.AsyncClient, state: dict, data: str,
+                  pair: bool = False) -> None:
     """A suggestion tapped instead of retyped. Same path as a Topic sent by hand."""
     topic = picked(state, data)
     if topic is None:
@@ -1326,6 +1490,9 @@ async def on_pick(client: httpx.AsyncClient, state: dict, data: str) -> None:
         await say(client, "ยังมีสคริปต์ค้างอยู่ กด 🗑 ทิ้งก่อนแล้วค่อยเลือกหัวข้อใหม่")
         return
     # Verbatim, so trend_origin matches it and the origin gets recorded.
+    if pair:
+        spawn(start_pair(client, state, topic), "start_pair")
+        return
     await say(client, f"👍 {topic}")
     spawn(make_script(client, state, topic,
                       locale=state.get("suggested_locale", locales.DEFAULT)),

@@ -36,6 +36,22 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   fails so the other still gets its reading. `retention.fetch(..., locale)`
   takes the channel from the clip's own Manifest, so there is no command
   argument that could name the wrong one.
+- **Locale pairs (2026-09-07).** `/both <topic>` and the 🌏 row under a
+  `/trends` list make the same Topic in both Locales, sequentially: Thai is
+  written, reviewed and rendered through the existing path, and `do_render()`
+  spawns `continue_pair()` only after the Clip is actually delivered. The
+  English half is written natively with the approved Thai Script as context
+  (`script._sibling_note()`), never translated — the line budgets and the
+  hooks differ. Both Manifests carry `pair_id` (the Thai half's clip id). A
+  failed render or a discarded Script cancels the queued half and says so.
+  Variants are drawn independently per half. Numbered buttons and the
+  automatic rounds stay Thai-only.
+- **Upload buttons carry their Clip id** (`upload:<clip_id>`), with the
+  pending set in `state["uploads"]` capped at 10. Before this the button meant
+  "whatever was rendered last", so two clips rendered back to back — which a
+  pair does by design — left the older button uploading the newer clip. A
+  button with no id still means the last clip, which is what it meant when it
+  was sent.
 - One container for the bot itself: no ports, no scheduler thread. A single
   Telegram `getUpdates` long-poll loop is its entire interface; the two
   recurring jobs (daily snapshots, `/trends` three times a day) ride that

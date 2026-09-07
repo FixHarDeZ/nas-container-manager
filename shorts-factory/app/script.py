@@ -471,6 +471,31 @@ NOTES = {
 }
 
 
+SIBLING_NOTES = {
+    "th": (
+        "คลิปเรื่องเดียวกันนี้เขียนไว้แล้วอีกภาษาหนึ่ง (ข้างล่าง) "
+        "ให้เล่ามุมเดียวกันและใช้ข้อเท็จจริงชุดเดียวกัน "
+        "แต่**เขียนใหม่เป็นภาษาไทยให้เป็นธรรมชาติ ห้ามแปลตรงตัว** "
+        "ความยาวบรรทัดและจังหวะให้เป็นไปตามกฎของภาษานี้:\n"
+    ),
+    "en": (
+        "The same clip has already been written in another language (below). "
+        "Cover the same angle and the same facts, but **write it natively in "
+        "English — do not translate**. Line lengths, the hook and the rhythm "
+        "follow this language's own rules:\n"
+    ),
+}
+
+
+def _sibling_note(sibling: dict, locale: str) -> str:
+    """The already-approved half of a pair, as context for the other half."""
+    head = SIBLING_NOTES.get(locale, SIBLING_NOTES["en"])
+    lines = [f"title: {sibling.get('title', '')}"]
+    for i, card in enumerate(sibling.get("cards") or [], 1):
+        lines.append(f"card {i}: {card.get('narration', '')}")
+    return head + "\n".join(lines)
+
+
 def _context_note(avoid: list[str], winners: list[str],
                   locale: str = locales.DEFAULT) -> str:
     """Tell the model what has been made already and what worked."""
@@ -517,6 +542,7 @@ async def generate(
     winners: list[str] | None = None,
     style: str = "",
     locale: str = locales.DEFAULT,
+    sibling: dict | None = None,
 ) -> dict:
     """Write a Script for `topic`, optionally revising `previous` per `feedback`.
 
@@ -529,6 +555,13 @@ async def generate(
     note = _context_note(avoid or [], winners or [], locale)
     if note:
         messages.append({"role": "system", "content": note})
+    if sibling:
+        # The other half of a Locale pair, already approved. Handed over as
+        # context rather than as text to translate: the line width, the hook
+        # rules and what lands with the audience all differ, so a translation
+        # comes back overflowing and flat. What must carry across is the
+        # angle — the same Topic told the same way, written natively.
+        messages.append({"role": "system", "content": _sibling_note(sibling, locale)})
     if style:
         messages.append({"role": "system", "content": style})
     label = "หัวข้อ" if locale == "th" else "Topic"
