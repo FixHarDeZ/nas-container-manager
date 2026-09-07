@@ -87,7 +87,10 @@ follows the clip rather than defaulting to `th`. Publishing an English clip
 on the Thai channel is now impossible by construction rather than prevented
 by convention or the `/help` text — two tests hold that line,
 `test_an_english_clip_never_uploads_through_the_thai_channel` and
-`test_the_upload_uses_the_locale_the_clip_was_delivered_with`. What remains
-is the credential itself: until `YOUTUBE_EN_*` is provisioned, the button
-never appears on an English clip at all, and the file is still copied by
-hand from `/volume1/shorts/en` and uploaded manually.
+`test_the_upload_uses_the_locale_the_clip_was_delivered_with`. The credential itself
+followed on 2026-09-07: the English channel is `Just Decoded It`
+(`@justdecodedit`), its OAuth values live at
+`stacks.shorts_factory.youtube_en.*`, and each Locale's token was checked
+against `channels.list?mine=true` to confirm which channel it actually
+publishes to — a token issued for the wrong channel looks exactly like a
+correct one until something has already been published through it.

@@ -292,14 +292,15 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   affects search, the channel page and suggestions.
 - The Google API-audit and OAuth-refresh-token claims behind ADR 0001 were
   never checked against Google's own docs. Confirm before building any upload.
-- **English Locale, still open (see `docs/adr/0008`):** only the second
-  YouTube channel itself — vault `stacks.shorts_factory.youtube_en.*`, its own
-  `scripts/youtube_auth.py` run with the consent screen `In production`, and
-  the `YOUTUBE_EN_*` names added to `secrets.manifest.yaml` **after** the
-  vault holds the values, never before: `render_env.py` raises
+- **English Locale: closed 2026-09-07.** Both channels are live — Thai
+  `FixHarDeZ` (`@fixhardez`), English `Just Decoded It` (`@justdecodedit`) —
+  with `stacks.shorts_factory.youtube_en.*` in the vault and the three
+  `YOUTUBE_EN_*` names mapped in `secrets.manifest.yaml`. That mapping goes in
+  **after** the vault holds the values, never before: `render_env.py` raises
   `missing vault path` and `make secrets` then fails for every stack in the
-  repo, not just this one. Until that is done there are no English numbers at
-  all, and the file is uploaded by hand. Everything else landed 2026-09-07:
+  repo, not just this one. Which channel a token actually belongs to is only
+  visible by asking (`channels.list?mine=true` per Locale) — worth re-checking
+  after any re-auth. The rest landed the same day:
   per-channel history/analytics/Gate, one snapshot pull per channel,
   `/retention` reading the channel off the Manifest, `/experiment` and the
   dashboard split per Locale, and the dashboard's ภาษา column. The

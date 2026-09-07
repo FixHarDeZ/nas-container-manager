@@ -156,11 +156,13 @@ audience at a time — thirty clips split across two audiences is not thirty
 data points about either of them (see `docs/adr/0008`). Entries and Manifests
 written before Locales existed carry no field and are read as Thai.
 
-**Not done yet:** the second YouTube channel itself. Nobody has run
-`scripts/youtube_auth.py` for it and the vault holds no `youtube_en.*` keys,
-so English clips render to `/volume1/shorts/en` and are uploaded by hand, and
-there are no English numbers to report at all. The handoff is written out
-under [Uploading to YouTube](#uploading-to-youtube).
+Both channels are live as of 2026-09-07: Thai publishes to **FixHarDeZ**
+(`@fixhardez`) and English to **Just Decoded It** (`@justdecodedit`), each
+with its own OAuth credentials in the vault. Verified by asking each Locale's
+token which channel it belongs to (`channels.list?mine=true`) — the check
+worth repeating after any re-auth, since a token issued against the wrong
+channel is otherwise indistinguishable from a right one until a clip is
+already published.
 
 ## Both languages from one Topic
 
@@ -489,11 +491,11 @@ that locale anyway. `do_upload()` uses the locale snapshotted at deliver
 time, so the button — once it exists — always uploads through the same
 channel the clip was written for. Category id and privacy are per-Locale
 too (`YOUTUBE_EN_CATEGORY_ID` / `YOUTUBE_EN_PRIVACY`, same defaults `28` and
-`public` as Thai). Until the second channel exists, `/en` clips are not
-uploaded from the bot at all — copy the file from `/volume1/shorts/en` and
-upload it by hand. `/help` tells the human this in Thai.
+`public` as Thai). With no `YOUTUBE_EN_*` set, `/en` clips get no button at all and the file has
+to be copied from `/volume1/shorts/en` and uploaded by hand; that was the
+state until 2026-09-07.
 
-### Provisioning the second channel
+### Provisioning a channel (done once per Locale)
 
 The order matters, because `scripts/render_env.py` refuses to build *any*
 stack's `.env` while a manifest points at a vault path that does not exist —
