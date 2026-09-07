@@ -1,10 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>การทดลอง: {{ factor }}</h1>
-<p class="warn">{{ verdict }}</p>
+{% for section in sections %}
+<h1>การทดลอง ({{ section.label }}): {{ factor }}</h1>
+{% if section.gate %}<p class="warn">{{ section.gate }}</p>{% endif %}
+<p class="warn">{{ section.verdict }}</p>
+
 
 <div class="kpis">
-  {% for name, data in arms.items() %}
+  {% for name, data in section.arms.items() %}
   <div class="kpi">
     <div class="label">{{ name }}</div>
     <div class="value">{% if data.median is none %}—{% else %}{{ "%.1f"|format(data.median) }}<small>%</small>{% endif %}</div>
@@ -18,7 +21,7 @@
   <thead><tr><th>arm</th><th class="num">คลิป</th><th class="num">ทิ้ง</th><th class="num">ล้มเหลว</th>
              <th class="num">views</th><th class="num">median ดูจนจบ</th></tr></thead>
   <tbody>
-  {% for name, data in arms.items() %}
+  {% for name, data in section.arms.items() %}
   <tr><td class="wide" data-label="arm">{{ name }}</td>
       <td class="num" data-label="คลิป">{{ data.clips }}</td>
       <td class="num" data-label="ทิ้ง">{{ data.discarded }}</td>
@@ -32,7 +35,7 @@
 
 <h2>ประโยคที่ต่อท้าย prompt</h2>
 <div class="grid">
-  {% for name, clause in clauses.items() %}
+  {% for name, clause in section.clauses.items() %}
   <div class="card"><p><strong>{{ name }}</strong></p><pre>{{ clause }}</pre></div>
   {% endfor %}
 </div>
@@ -42,7 +45,7 @@
 <table>
   <thead><tr><th>หมวด</th><th class="num">คลิป</th><th class="num">มาจาก /trends</th><th class="num">views</th></tr></thead>
   <tbody>
-  {% for name, data in categories.items() %}
+  {% for name, data in section.categories.items() %}
   <tr><td class="wide" data-label="หมวด">{{ name }}</td>
       <td class="num" data-label="คลิป">{{ data.clips }}</td>
       <td class="num" data-label="มาจาก /trends">{{ data.trend }}</td>
@@ -51,4 +54,5 @@
   </tbody>
 </table>
 </div>
+{% endfor %}
 {% endblock %}

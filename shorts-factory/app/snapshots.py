@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 
 import httpx
 
-from app import analytics, manifest, youtube
+from app import analytics, locales, manifest, youtube
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +61,9 @@ def _wanted(records: list[dict], today: date) -> dict[str, dict]:
     return out
 
 
-async def _rows(client: httpx.AsyncClient, ids: list[str]) -> list[list]:
-    token = await youtube._access_token(client)
+async def _rows(client: httpx.AsyncClient, ids: list[str],
+                locale: str = locales.DEFAULT) -> list[list]:
+    token = await youtube._access_token(client, locale)
     reply = await client.get(
         analytics.REPORTS_URL,
         headers={"Authorization": f"Bearer {token}"},
@@ -93,16 +94,37 @@ async def run() -> int:
     if not wanted:
         return 0
 
-    # Youngest first: the filter is a comma-joined URL and only so many ids fit,
-    # and at 3 clips a day the 30-day window outgrows that cap within a
-    # fortnight. The newest Clips are the ones still moving and the ones whose
-    # day-7 reading has not been taken yet, so they are the ones that must not
-    # be dropped. 50 ids covers ~16 days at that cadence, which keeps day 7
-    # inside the window.
-    # ponytail: one batch. Chunk the ids if the full 30-day tail matters later.
-    youngest = sorted(wanted, key=lambda v: wanted[v].get("published_at") or "", reverse=True)
+    # One pull per channel, never one pull for both: each Locale publishes to
+    # its own channel (docs/adr/0008), and asking a channel about a video id it
+    # does not own is not an error — the row simply does not come back, which
+    # reads as "Analytics has not processed it yet".
+    by_locale: dict[str, list[str]] = {}
+    for video_id, record in wanted.items():
+        by_locale.setdefault(record.get("locale", locales.DEFAULT), []).append(video_id)
+
+    rows: list[list] = []
     async with httpx.AsyncClient(timeout=60) as client:
-        rows = await _rows(client, youngest[: analytics.MAX_VIDEOS])
+        for locale, ids in by_locale.items():
+            if not youtube.configured(locale):
+                # A Locale whose channel has no credentials yet. Its Clips were
+                # uploaded by hand, so there is nothing here to ask about.
+                logger.info("ข้าม snapshot ของภาษา %s — ยังไม่มี credential", locale)
+                continue
+            # Youngest first: the filter is a comma-joined URL and only so many
+            # ids fit, and at 3 clips a day the 30-day window outgrows that cap
+            # within a fortnight. The newest Clips are the ones still moving and
+            # the ones whose day-7 reading has not been taken yet, so they are
+            # the ones that must not be dropped. The cap is per request, so each
+            # channel gets its own 50.
+            # ponytail: one batch per channel. Chunk if the 30-day tail matters.
+            youngest = sorted(
+                ids, key=lambda v: wanted[v].get("published_at") or "", reverse=True
+            )
+            try:
+                rows += await _rows(client, youngest[: analytics.MAX_VIDEOS], locale)
+            except Exception:
+                # One channel failing must not cost the other its daily reading.
+                logger.exception("ดึง snapshot ของภาษา %s ไม่สำเร็จ", locale)
 
     written = 0
     for row in rows:

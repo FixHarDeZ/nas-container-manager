@@ -10,7 +10,7 @@ from datetime import date, timedelta
 
 import httpx
 
-from app import history, youtube
+from app import history, locales, youtube
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +30,19 @@ class AnalyticsError(RuntimeError):
     """Stats could not be fetched. Never fatal — nothing else depends on them."""
 
 
-async def performance() -> list[dict]:
+async def performance(locale: str = locales.DEFAULT) -> list[dict]:
     """Views and retention per uploaded video, best retention first.
 
     Sorted by how much of the clip people actually watched rather than by
     views: for a Shorts channel that is the number that says whether the
     writing worked.
     """
-    ids = history.video_ids()[-MAX_VIDEOS:]
+    ids = history.video_ids(locale)[-MAX_VIDEOS:]
     if not ids:
         return []
 
     async with httpx.AsyncClient(timeout=60) as client:
-        token = await youtube._access_token(client)
+        token = await youtube._access_token(client, locale)
         reply = await client.get(
             REPORTS_URL,
             headers={"Authorization": f"Bearer {token}"},
@@ -73,7 +73,7 @@ async def performance() -> list[dict]:
     return result
 
 
-async def latest_data_date() -> str | None:
+async def latest_data_date(locale: str = locales.DEFAULT) -> str | None:
     """The most recent day YouTube has processed.
 
     Analytics runs a few days behind, so a clip uploaded today has no rows yet.
@@ -82,7 +82,7 @@ async def latest_data_date() -> str | None:
     """
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            token = await youtube._access_token(client)
+            token = await youtube._access_token(client, locale)
             reply = await client.get(
                 REPORTS_URL,
                 headers={"Authorization": f"Bearer {token}"},
@@ -101,9 +101,14 @@ async def latest_data_date() -> str | None:
         return None
 
 
-def gate_note() -> str | None:
-    """What is still missing before conclusions are allowed, or None if past it."""
-    published = len(history.video_ids())
+def gate_note(locale: str = locales.DEFAULT) -> str | None:
+    """What is still missing before conclusions are allowed, or None if past it.
+
+    Counted per channel (docs/adr/0008): thirty Clips split across two
+    audiences is not thirty data points about either of them, so each Locale
+    reaches the same threshold on its own.
+    """
+    published = len(history.video_ids(locale))
     if published >= GATE_CLIPS:
         return None
     return (
@@ -113,16 +118,17 @@ def gate_note() -> str | None:
     )
 
 
-def format_report(rows: list[dict], as_of: str | None = None) -> str:
+def format_report(rows: list[dict], as_of: str | None = None,
+                  locale: str = locales.DEFAULT) -> str:
     if not rows:
         lag = f" ข้อมูลล่าสุดที่ YouTube ประมวลผลคือ {as_of}" if as_of else ""
-        gate = gate_note()
+        gate = gate_note(locale)
         head = f"{gate}\n\n" if gate else ""
         return (
             f"{head}ยังไม่มีสถิติ — นับเฉพาะคลิปที่อัปผ่านบอทตัวนี้ "
             f"และ YouTube ประมวลผลช้ากว่าปัจจุบันหลายวัน{lag}"
         )
-    gate = gate_note()
+    gate = gate_note(locale)
     lines = [f"📊 {len(rows)} คลิปล่าสุด (เรียงตาม % ที่คนดูจนจบ)", ""]
     if gate:
         lines = [gate, ""] + lines
@@ -134,7 +140,8 @@ def format_report(rows: list[dict], as_of: str | None = None) -> str:
     return "\n".join(lines)
 
 
-async def winning_examples(limit: int = 3) -> list[str]:
+async def winning_examples(limit: int = 3,
+                           locale: str = locales.DEFAULT) -> list[str]:
     """Titles worth writing more like — nothing at all before the Gate.
 
     Feeding the top performers back into the prompt is the whole point of the
@@ -142,10 +149,10 @@ async def winning_examples(limit: int = 3) -> list[str]:
     the channel's views: the model would learn from a single sample and drift
     off the locked niche. See docs/adr/0004.
     """
-    if gate_note() is not None:
+    if gate_note(locale) is not None:
         return []
     try:
-        rows = await performance()
+        rows = await performance(locale)
     except Exception:
         logger.exception("ดึงสถิติเพื่อป้อน prompt ไม่สำเร็จ")
         return []

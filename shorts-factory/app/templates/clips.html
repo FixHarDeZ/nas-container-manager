@@ -29,7 +29,7 @@
 <div class="rows">
 <table>
   <thead>
-    <tr><th>เมื่อ</th><th>หัวข้อ</th><th>variant</th><th>ผล</th>
+    <tr><th>เมื่อ</th><th>หัวข้อ</th><th>ภาษา</th><th>variant</th><th>ผล</th>
         <th class="num">views</th><th class="num">ดูจนจบ</th></tr>
   </thead>
   <tbody>
@@ -37,6 +37,7 @@
   <tr data-outcome="{{ row.outcome }}">
     <td class="muted" data-label="เมื่อ">{{ row.created_at[:16].replace("T", " ") }}</td>
     <td class="wide" data-label="หัวข้อ"><a href="/clip/{{ row.id }}">{{ row.topic or "(ไม่มีหัวข้อ)" }}</a></td>
+    <td data-label="ภาษา"><span class="pill">{{ row.locale }}</span></td>
     <td data-label="variant">
       {% if row.explore %}<span class="pill">explore</span>
       {% elif row.variant %}<span class="pill">{{ row.variant }}</span>

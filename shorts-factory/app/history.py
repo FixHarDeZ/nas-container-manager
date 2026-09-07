@@ -43,12 +43,27 @@ def record(video_id: str, script: dict, topic: str, locale: str = "th") -> None:
     PATH.write_text(json.dumps(entries, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def recent_titles(limit: int = RECENT_TITLES) -> list[str]:
-    return [e["title"] for e in load()[-limit:] if e.get("title")]
+def _of_locale(entries: list[dict], locale: str | None) -> list[dict]:
+    """Entries for one channel. `None` means every channel.
+
+    Entries written before Locales existed carry no field and belong to the
+    Thai channel, which is the only one that existed then.
+    """
+    if locale is None:
+        return entries
+    return [e for e in entries if e.get("locale", "th") == locale]
 
 
-def video_ids() -> list[str]:
-    return [e["video_id"] for e in load() if e.get("video_id")]
+def recent_titles(limit: int = RECENT_TITLES, locale: str | None = None) -> list[str]:
+    entries = _of_locale(load(), locale)
+    return [e["title"] for e in entries[-limit:] if e.get("title")]
+
+
+def video_ids(locale: str | None = None) -> list[str]:
+    """Ids of published Clips. Narrowed by Locale, because a video id from the
+    other channel in an Analytics filter does not error — it simply returns no
+    row, which reads as "no data yet" rather than "wrong channel"."""
+    return [e["video_id"] for e in _of_locale(load(), locale) if e.get("video_id")]
 
 
 def title_of(video_id: str) -> str:

@@ -1285,3 +1285,56 @@ read as Thai). Two tests hold the line:
 suite passes 159 in the container. The second channel itself still does not
 exist — until it does, English clips are still copied by hand from
 `/volume1/shorts/en`.
+
+## 2026-09-07 — English Locale, batch 2: every number is per channel
+
+Batch 1 (commit `b745415`) made the bot able to write, render and route an
+English clip. Batch 2 makes the measurements follow the same split, because a
+Gate counted across two audiences is not the Gate ADR 0004 describes.
+
+- `history.py`: each entry records its `locale`; `video_ids(locale)` and
+  `recent_titles(limit, locale)` filter on it. No argument means every
+  channel; an entry written before Locales existed has no field and is read as
+  Thai.
+- `analytics.py`: `performance`, `latest_data_date`, `gate_note`,
+  `format_report` and `winning_examples` all take a Locale and use that
+  channel's own OAuth token. The Gate numbers are unchanged (30 clips, 300
+  views per variant) — each channel reaches them on its own count.
+- `experiment.py`: `for_locale()` filters records first; `report()` labels the
+  Locale in its heading and runs `by_category` on the filtered set, or the
+  Thai `เทค` and the English `tech` would sit in one table as unrelated rows.
+- `snapshots.py`: one Analytics pull per channel, each with its own token and
+  its own `MAX_VIDEOS` cap (that cap is a URL-length limit per request, not a
+  daily budget). A Locale with no credentials is skipped with a log line, and
+  a channel that fails is caught so the other still gets its daily reading.
+  This is the one place where mixing would have been silent: asking a channel
+  about a video id it does not own is not an error, it just returns no row,
+  which reads exactly like "Analytics has not processed it yet".
+- `retention.py` + `main.on_retention`: the channel comes off the clip's own
+  Manifest. No `/retention <lang>` argument, so no way to pair a video id with
+  the wrong channel.
+- `main.py`: `/stats` prints one report per channel that has credentials —
+  with only Thai configured the output is byte-identical to before.
+  `/experiment` prints Thai always and another Locale once it has Manifests.
+  `make_script` now feeds `avoid`/`winners` from the clip's own channel
+  instead of blanking them for English.
+- Dashboard: a ภาษา column on the clip list, and `/experiment` renders one
+  section per Locale (heading, gate note, verdict, arms, its own clauses,
+  categories). Still GET-only; `test_no_route_can_write` still passes.
+- `scripts/youtube_auth.py` docstring now names both vault paths and warns
+  that writing the English token over `stacks.shorts_factory.youtube.*`
+  silently redirects every Thai upload.
+
+**Deliberately not done:** `YOUTUBE_EN_CLIENT_ID` / `_CLIENT_SECRET` /
+`_REFRESH_TOKEN` are still absent from `secrets.manifest.yaml`.
+`scripts/render_env.py` raises `manifest references missing vault path` for a
+key the vault does not hold, and `make secrets` then fails for *every* stack
+in the repo. The mapping is added after the vault has the values, as a step of
+the human OAuth handoff — the ordering is written out in the README under
+"Provisioning the second channel".
+
+Tests: 169 passing in the container (`docker compose run --rm --entrypoint
+pytest shorts-factory tests/`), including new coverage for per-channel history
+filtering, per-channel Gate counting, per-channel snapshot pulls (including a
+channel with no credentials and a channel that fails), and `/retention`
+reading the locale off the Manifest.

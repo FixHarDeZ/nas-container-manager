@@ -62,10 +62,18 @@ all week suddenly stopped. The env prefix is already reserved
 (`locales.py`'s `youtube_prefix` is `YOUTUBE_EN_` for the `en` Locale, mirroring
 the Thai `YOUTUBE_` prefix) and the vault path is `stacks.shorts_factory.
 youtube_en.*`, alongside the existing `stacks.shorts_factory.youtube.*`.
-Past that credential, `experiment.report()` needs to count clips and views
-per locale rather than pooling them, `/stats` and `/retention`'s history need
-the same split, and the dashboard needs a locale column so a human reading it
-does not have to guess which channel a row belongs to.
+Past that credential, everything that reads a number had to learn which
+channel it was reading, and that part has since been built: `history.json`
+records the Locale of each upload and every read of it filters on that,
+`analytics` takes a Locale and uses that channel's own token, the Gate is
+counted per channel (the thresholds are unchanged — each channel simply
+reaches them separately), `experiment.report()` and the dashboard's
+`/experiment` print one section per Locale, the daily snapshot does one
+Analytics pull per channel, and `/retention` takes the channel from the
+Clip's own Manifest. Categories are split the same way: pooled, the Thai
+`เทค` and the English `tech` would read as two unrelated rows of one table.
+Manifests and history entries older than Locales carry no field and are read
+as Thai, which is what they are.
 
 The locale-aware routing itself has since landed: `youtube.py` reads every
 setting — client credentials, category id, privacy, caption language — under

@@ -14,7 +14,7 @@ from __future__ import annotations
 import random
 from statistics import median
 
-from app import analytics, manifest
+from app import analytics, locales, manifest
 
 FACTOR = "hook"
 
@@ -87,6 +87,16 @@ def _percent(record: dict) -> float | None:
     """The day-7 reading, or nothing. Never the latest one — see ADR 0004."""
     snapshot = manifest.day7(record)
     return snapshot.get("percent") if snapshot else None
+
+
+def for_locale(records: list[dict], locale: str = locales.DEFAULT) -> list[dict]:
+    """Only the Clips written for one audience.
+
+    Two audiences in one set of counters is two smaller, noisier experiments
+    wearing one number (docs/adr/0008). Manifests older than Locales carry no
+    field and belong to Thai, the only Locale that existed then.
+    """
+    return [r for r in records if r.get("locale", locales.DEFAULT) == locale]
 
 
 def tally(records: list[dict]) -> dict[str, dict]:
@@ -191,12 +201,14 @@ def by_category(records: list[dict]) -> dict[str, dict]:
     return out
 
 
-def report(records: list[dict]) -> str:
+def report(records: list[dict], locale: str = locales.DEFAULT) -> str:
+    records = for_locale(records, locale)
     counts = tally(records)
     # The channel-wide warning goes first: it says the figures below cannot be
     # used to decide anything, which is no use underneath them.
-    gate = analytics.gate_note()
-    lines = ([gate, ""] if gate else []) + [f"🧪 การทดลอง: {FACTOR}", ""]
+    gate = analytics.gate_note(locale)
+    locale_label = locales.get(locale)["label"]
+    lines = ([gate, ""] if gate else []) + [f"🧪 การทดลอง ({locale_label}): {FACTOR}", ""]
     for name, data in counts.items():
         label = "explore (ไม่นับผล)" if name == "explore" else name
         percents = data["percents"]

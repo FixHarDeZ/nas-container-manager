@@ -971,11 +971,11 @@ def test_a_revision_keeps_the_variant_it_was_born_with(tmp_path, monkeypatch):
     """Rewriting a script you dislike must not quietly pick the winner."""
     monkeypatch.setattr(manifest, "DIR", tmp_path / "clips")
     monkeypatch.setattr(main, "save_state", lambda state: None)
-    monkeypatch.setattr(history, "recent_titles", lambda: [])
+    monkeypatch.setattr(history, "recent_titles", lambda locale=None: [])
     monkeypatch.setattr(main, "close_prompt", _nothing)
     monkeypatch.setattr(main, "say", _nothing)
 
-    async def no_winners():
+    async def no_winners(limit=3, locale="th"):
         return []
 
     monkeypatch.setattr(analytics, "winning_examples", no_winners)
@@ -1126,11 +1126,12 @@ def test_the_newest_clips_are_the_ones_that_get_measured(tmp_path, monkeypatch):
 
     asked = []
 
-    async def fake_rows(client, ids):
+    async def fake_rows(client, ids, locale="th"):
         asked.extend(ids)
         return []
 
     monkeypatch.setattr(snapshots, "_rows", fake_rows)
+    monkeypatch.setattr(snapshots.youtube, "configured", lambda locale="th": True)
     import datetime as dt
     monkeypatch.setattr(snapshots, "MAX_AGE_DAYS", 3650)
     asyncio.run(snapshots.run())
@@ -1202,9 +1203,9 @@ def test_old_clips_get_a_manifest_marked_reconstructed(tmp_path, monkeypatch):
 
 def test_nothing_is_fed_back_into_the_prompt_before_the_gate(monkeypatch):
     """One clip holds 88% of this channel's views — see docs/adr/0004."""
-    monkeypatch.setattr(history, "video_ids", lambda: ["a"] * 9)
+    monkeypatch.setattr(history, "video_ids", lambda locale=None: ["a"] * 9)
 
-    def explode():
+    def explode(locale="th"):
         raise AssertionError("performance() must not even be called before the gate")
 
     monkeypatch.setattr(analytics, "performance", explode)
@@ -1213,10 +1214,10 @@ def test_nothing_is_fed_back_into_the_prompt_before_the_gate(monkeypatch):
 
 
 def test_past_the_gate_the_winners_come_back(monkeypatch):
-    monkeypatch.setattr(history, "video_ids", lambda: ["a"] * 30)
+    monkeypatch.setattr(history, "video_ids", lambda locale=None: ["a"] * 30)
     monkeypatch.setattr(history, "title_of", lambda v: "ชนะ")
 
-    async def rows():
+    async def rows(locale="th"):
         return [{"title": "ชนะ", "views": 12}, {"title": "แพ้", "views": 0}]
 
     monkeypatch.setattr(analytics, "performance", rows)
@@ -1225,7 +1226,7 @@ def test_past_the_gate_the_winners_come_back(monkeypatch):
 
 
 def test_the_report_says_when_it_cannot_be_trusted(monkeypatch):
-    monkeypatch.setattr(history, "video_ids", lambda: ["a"] * 9)
+    monkeypatch.setattr(history, "video_ids", lambda locale=None: ["a"] * 9)
     body = analytics.format_report([{"video_id": "a", "title": "t", "views": 3,
                                      "seconds": 20, "percent": 55}])
     assert "ยังไม่พอสรุป" in body
@@ -1987,7 +1988,8 @@ def test_an_english_clip_is_written_in_english_and_learns_from_nothing_thai(monk
     monkeypatch.setattr(main.manifest, "start", lambda topic, locale="th": "test-id")
     monkeypatch.setattr(main.manifest, "update", lambda *a, **kw: None)
     monkeypatch.setattr(main.manifest, "add_script", lambda *a, **kw: None)
-    monkeypatch.setattr(main.history, "recent_titles", lambda: ["คลิปไทยเก่า"])
+    monkeypatch.setattr(main.history, "recent_titles",
+                        lambda locale=None: ["คลิปไทยเก่า"] if locale == "th" else [])
 
     async def fake_generate(topic, previous=None, feedback="", avoid=None,
                             winners=None, style="", locale="th"):
@@ -1999,7 +2001,7 @@ def test_an_english_clip_is_written_in_english_and_learns_from_nothing_thai(monk
     asyncio.run(main.make_script(None, state, "docker logs", locale="en"))
 
     assert seen["locale"] == "en"
-    assert seen["avoid"] == [], "Thai titles must not reach the English prompt"
+    assert seen["avoid"] == [], "the Thai channel's titles must not reach the English prompt"
     assert seen["style"] in list(experiment.VARIANTS_EN.values()) + [experiment.EXPLORE_CLAUSE_EN]
     assert state["locale"] == "en"
 
@@ -2092,3 +2094,155 @@ def test_the_upload_uses_the_locale_the_clip_was_delivered_with(monkeypatch, tmp
 
     assert seen["upload"] == "en"
     assert seen["captions"] == "en", "an English clip must not be tagged with Thai subtitles"
+
+
+# --- Locales, batch 2: two channels, two sets of numbers ---------------------
+
+def _published(locale: str, video_id: str, variant: str = "question",
+               views: int = 100, percent: float = 50.0) -> dict:
+    return {
+        "id": video_id, "locale": locale, "video_id": video_id,
+        "variant": variant, "outcome": "rendered", "published": True,
+        "published_at": "2026-09-01T10:00:00",
+        "snapshots": [{"date": "2026-09-08", "age_days": 7,
+                       "views": views, "percent": percent}],
+    }
+
+
+def test_history_is_read_per_channel(monkeypatch, tmp_path):
+    monkeypatch.setattr(history, "PATH", tmp_path / "history.json")
+    history.record("th1", {"title": "คลิปไทย"}, "หัวข้อ")
+    history.record("en1", {"title": "An English clip"}, "topic", "en")
+
+    assert history.video_ids("th") == ["th1"]
+    assert history.video_ids("en") == ["en1"]
+    assert history.video_ids() == ["th1", "en1"], "no locale means every channel"
+    assert history.recent_titles(locale="en") == ["An English clip"]
+
+
+def test_an_entry_written_before_locales_belongs_to_thai(monkeypatch, tmp_path):
+    path = tmp_path / "history.json"
+    path.write_text(json.dumps([{"video_id": "old", "title": "เก่า"}]), encoding="utf-8")
+    monkeypatch.setattr(history, "PATH", path)
+    assert history.video_ids("th") == ["old"]
+    assert history.video_ids("en") == []
+
+
+def test_each_channel_reaches_the_gate_on_its_own_count(monkeypatch, tmp_path):
+    """Thirty clips split across two audiences is not thirty data points about
+    either of them — see docs/adr/0008."""
+    monkeypatch.setattr(history, "PATH", tmp_path / "history.json")
+    for i in range(30):
+        history.record(f"th{i}", {"title": f"ไทย {i}"}, "หัวข้อ")
+    for i in range(3):
+        history.record(f"en{i}", {"title": f"English {i}"}, "topic", "en")
+
+    assert analytics.gate_note("th") is None, "the Thai channel is past the gate"
+    assert "3/30" in analytics.gate_note("en"), "the English one is not"
+
+
+def test_the_english_prompt_never_learns_from_the_thai_channel(monkeypatch, tmp_path):
+    monkeypatch.setattr(history, "PATH", tmp_path / "history.json")
+    for i in range(30):
+        history.record(f"th{i}", {"title": f"ไทย {i}"}, "หัวข้อ")
+
+    async def never(locale="th"):
+        raise AssertionError("performance() must not be called before that channel's gate")
+
+    monkeypatch.setattr(analytics, "performance", never)
+    assert asyncio.run(analytics.winning_examples(locale="en")) == []
+
+
+def test_the_experiment_is_counted_per_channel():
+    records = [_published("th", "t1"), _published("th", "t2", views=7),
+               _published("en", "e1", variant="shock_number", views=900)]
+
+    thai = experiment.tally(experiment.for_locale(records, "th"))
+    english = experiment.tally(experiment.for_locale(records, "en"))
+    assert thai["question"]["clips"] == 2
+    assert thai["shock_number"]["clips"] == 0, "the English clip is not Thai data"
+    assert english["shock_number"]["views"] == 900
+    assert "อังกฤษ" in experiment.report(records, "en")
+
+
+def test_a_manifest_without_a_locale_is_counted_as_thai():
+    records = [{"variant": "question", "outcome": "rendered", "snapshots": []}]
+    assert experiment.for_locale(records, "th") == records
+    assert experiment.for_locale(records, "en") == []
+
+
+def test_each_channel_gets_its_own_snapshot_pull(tmp_path, monkeypatch):
+    """One pull per channel: a video id the channel does not own comes back as
+    no row at all, which would read as 'not processed yet'."""
+    monkeypatch.setattr(manifest, "DIR", tmp_path / "clips")
+    monkeypatch.setattr(snapshots, "MAX_AGE_DAYS", 3650)
+    for locale, video_id in (("th", "thai-vid"), ("en", "english-vid")):
+        clip_id = manifest.start("หัวข้อ", locale)
+        manifest.update(clip_id, video_id=video_id, published=True,
+                        published_at="2026-09-01T10:00:00")
+
+    asked = []
+
+    async def fake_rows(client, ids, locale="th"):
+        asked.append((locale, ids))
+        return []
+
+    monkeypatch.setattr(snapshots, "_rows", fake_rows)
+    monkeypatch.setattr(snapshots.youtube, "configured", lambda locale="th": True)
+    asyncio.run(snapshots.run())
+    assert sorted(asked) == [("en", ["english-vid"]), ("th", ["thai-vid"])]
+
+
+def test_a_channel_with_no_credentials_is_skipped_not_asked(tmp_path, monkeypatch):
+    monkeypatch.setattr(manifest, "DIR", tmp_path / "clips")
+    monkeypatch.setattr(snapshots, "MAX_AGE_DAYS", 3650)
+    for locale, video_id in (("th", "thai-vid"), ("en", "english-vid")):
+        clip_id = manifest.start("หัวข้อ", locale)
+        manifest.update(clip_id, video_id=video_id, published=True,
+                        published_at="2026-09-01T10:00:00")
+
+    asked = []
+
+    async def fake_rows(client, ids, locale="th"):
+        asked.append(locale)
+        return []
+
+    monkeypatch.setattr(snapshots, "_rows", fake_rows)
+    monkeypatch.setattr(snapshots.youtube, "configured", lambda locale="th": locale == "th")
+    asyncio.run(snapshots.run())
+    assert asked == ["th"]
+
+
+def test_one_channel_failing_does_not_cost_the_other_its_reading(tmp_path, monkeypatch):
+    monkeypatch.setattr(manifest, "DIR", tmp_path / "clips")
+    monkeypatch.setattr(snapshots, "MAX_AGE_DAYS", 3650)
+    for locale, video_id in (("th", "thai-vid"), ("en", "english-vid")):
+        clip_id = manifest.start("หัวข้อ", locale)
+        manifest.update(clip_id, video_id=video_id, published=True,
+                        published_at="2026-09-01T10:00:00")
+
+    async def fake_rows(client, ids, locale="th"):
+        if locale == "en":
+            raise analytics.AnalyticsError("ช่องอังกฤษล่ม")
+        return [["thai-vid", 5, 0, 0, 0, 0, 44.0, 9.0, 1.0]]
+
+    monkeypatch.setattr(snapshots, "_rows", fake_rows)
+    monkeypatch.setattr(snapshots.youtube, "configured", lambda locale="th": True)
+    assert asyncio.run(snapshots.run()) == 1
+
+
+def test_the_retention_curve_is_read_from_the_clips_own_channel(monkeypatch):
+    asked = {}
+
+    async def fake_fetch(video_id, client=None, locale="th"):
+        asked[video_id] = locale
+        raise retention.NoCurve("ยังไม่มีเส้น")
+
+    monkeypatch.setattr(main.retention, "fetch", fake_fetch)
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main.manifest, "load_all", lambda: [
+        dict(_published("en", "english-vid"),
+             render={"seconds": 20.0, "cards": [{"start": 0.0, "narration": "x"}]}),
+    ])
+    asyncio.run(main.on_retention(None, "english-vid"))
+    assert asked == {"english-vid": "en"}

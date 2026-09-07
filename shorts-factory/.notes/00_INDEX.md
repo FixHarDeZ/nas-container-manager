@@ -22,6 +22,20 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   `rglob` instead of `glob` to reach both folders and reads the locale back
   from the folder name. See `docs/adr/0008` for why English publishes to a
   second channel instead of sharing the Thai one.
+- **Numbers are per channel (2026-09-07, batch 2).** `history.json` carries a
+  `locale` per upload; `history.video_ids(locale)` / `recent_titles(locale)`
+  filter on it (no argument = every channel, no field = Thai).
+  `analytics.performance/latest_data_date/gate_note/format_report/winning_examples`
+  all take a Locale and use that channel's token, so ADR 0004's Gate is
+  reached per channel with the same thresholds. `experiment.for_locale()`
+  filters before `tally`/`by_category`, and `report(records, locale)` prints
+  one section per channel. `snapshots.run()` groups the day's clips by Locale
+  and does one Analytics pull per channel — a video id the channel does not
+  own returns no row rather than an error, which would read as "not processed
+  yet" — skipping a Locale with no credentials and catching a channel that
+  fails so the other still gets its reading. `retention.fetch(..., locale)`
+  takes the channel from the clip's own Manifest, so there is no command
+  argument that could name the wrong one.
 - One container for the bot itself: no ports, no scheduler thread. A single
   Telegram `getUpdates` long-poll loop is its entire interface; the two
   recurring jobs (daily snapshots, `/trends` three times a day) ride that
@@ -262,14 +276,18 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   affects search, the channel page and suggestions.
 - The Google API-audit and OAuth-refresh-token claims behind ADR 0001 were
   never checked against Google's own docs. Confirm before building any upload.
-- **English Locale batch 2, still open (see `docs/adr/0008`):** the second
-  YouTube channel itself (`YOUTUBE_EN_*` env, vault
-  `stacks.shorts_factory.youtube_en.*`, its own `scripts/youtube_auth.py` run
-  with the consent screen `In production`), per-locale analytics/retention,
-  per-locale Gate counting in `experiment.report()` (today it counts every
-  clip toward one Gate regardless of language), and a locale column on the
-  dashboard. The upload-routing guard has since landed and is
-  credential-gated: `youtube.py` reads every setting under the Locale's own
+- **English Locale, still open (see `docs/adr/0008`):** only the second
+  YouTube channel itself — vault `stacks.shorts_factory.youtube_en.*`, its own
+  `scripts/youtube_auth.py` run with the consent screen `In production`, and
+  the `YOUTUBE_EN_*` names added to `secrets.manifest.yaml` **after** the
+  vault holds the values, never before: `render_env.py` raises
+  `missing vault path` and `make secrets` then fails for every stack in the
+  repo, not just this one. Until that is done there are no English numbers at
+  all, and the file is uploaded by hand. Everything else landed 2026-09-07:
+  per-channel history/analytics/Gate, one snapshot pull per channel,
+  `/retention` reading the channel off the Manifest, `/experiment` and the
+  dashboard split per Locale, and the dashboard's ภาษา column. The
+  upload-routing guard is credential-gated: `youtube.py` reads every setting under the Locale's own
   env prefix with no shared fallback, `deliver()` only shows the button when
   `youtube.configured(locale)` is true for that clip's locale, and
   `add_captions` tags the track from the Locale — so until `YOUTUBE_EN_*` is

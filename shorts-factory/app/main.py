@@ -498,11 +498,11 @@ async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
             topic,
             previous=previous,
             feedback=feedback,
-            # Both lists are Thai titles from the Thai channel: history has no
-            # Locale until an upload writes one (batch 2), and there is nothing
-            # to be learnt for a US audience from what a Thai one watched.
-            avoid=history.recent_titles() if locale == locales.DEFAULT else [],
-            winners=await analytics.winning_examples() if locale == locales.DEFAULT else [],
+            # Both lists are read per channel: what a Thai audience watched
+            # says nothing about a US one, and each Locale reaches ADR 0004's
+            # Gate on its own count (docs/adr/0008).
+            avoid=history.recent_titles(locale=locale),
+            winners=await analytics.winning_examples(locale=locale),
             style=state.get("style", ""),
             locale=locale,
         )
@@ -907,14 +907,29 @@ async def send_photo(client: httpx.AsyncClient, path: Path, caption: str) -> Non
 # --- dispatch ----------------------------------------------------------------
 
 async def on_stats(client: httpx.AsyncClient) -> None:
+    """One report per channel this bot can read.
+
+    A Locale whose channel has no credentials is skipped rather than reported
+    empty: its Clips were uploaded by hand and this bot cannot see them. With
+    only the Thai channel configured that is exactly the report it always was.
+    """
     await say(client, "📊 กำลังดึงสถิติ...")
-    try:
-        rows = await analytics.performance()
-        as_of = await analytics.latest_data_date() if not rows else None
-        await say(client, analytics.format_report(rows, as_of))
-    except Exception as exc:
-        logger.exception("stats failed")
-        await say(client, f"ดึงสถิติไม่ได้: {exc}")
+    asked = 0
+    for locale in locales.codes():
+        if not youtube.configured(locale):
+            continue
+        asked += 1
+        label = locales.get(locale)["label"]
+        try:
+            rows = await analytics.performance(locale)
+            as_of = await analytics.latest_data_date(locale) if not rows else None
+            report = analytics.format_report(rows, as_of, locale)
+            await say(client, f"[{label}]\n{report}" if asked > 1 else report)
+        except Exception as exc:
+            logger.exception("stats failed (%s)", locale)
+            await say(client, f"ดึงสถิติของช่อง{label}ไม่ได้: {exc}")
+    if not asked:
+        await say(client, "ยังไม่ได้ตั้งค่าช่อง YouTube เลยสักช่อง")
 
 
 async def take_snapshots(client: httpx.AsyncClient, state: dict, announce: bool = False) -> None:
@@ -1066,7 +1081,10 @@ async def on_retention(client: httpx.AsyncClient, video_id: str = "") -> None:
             if not duration:
                 continue
             try:
-                rows = await retention.fetch(record["video_id"], session)
+                rows = await retention.fetch(
+                    record["video_id"], session,
+                    record.get("locale", locales.DEFAULT),
+                )
             except retention.NoCurve as exc:
                 last_error = str(exc)
                 continue
@@ -1194,7 +1212,14 @@ async def on_text(client: httpx.AsyncClient, state: dict, text: str) -> None:
         await on_say(client, text[len("/say"):].strip())
         return
     if text.startswith("/experiment"):
-        await say(client, experiment.report(manifest.load_all()))
+        records = manifest.load_all()
+        for locale in locales.codes():
+            # Thai always: it is the channel that has been running. Another
+            # Locale only appears once it has Clips, so the report stays what
+            # it was until the second channel has something to say.
+            if locale != locales.DEFAULT and not experiment.for_locale(records, locale):
+                continue
+            await say(client, experiment.report(records, locale))
         return
     if text.startswith("/retention"):
         await on_retention(client, text.split(maxsplit=1)[1].strip() if " " in text else "")

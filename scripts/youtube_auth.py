@@ -14,10 +14,25 @@ Before running, in https://console.cloud.google.com:
   3. Credentials -> Create credentials -> OAuth client ID -> **Desktop app**.
      Pass the client id and secret to this script.
 
-Paste the printed token into the vault:
+Paste the printed token into the vault, under the path for the channel you
+just authorised — one channel per Locale (docs/adr/0008), and writing the
+English channel's token over the Thai path silently redirects every Thai
+upload:
 
-    make edit-vault    # stacks.shorts_factory.youtube.{client_id,client_secret,refresh_token}
+    make edit-vault
+    #  Thai channel:    stacks.shorts_factory.youtube.{client_id,client_secret,refresh_token}
+    #  English channel: stacks.shorts_factory.youtube_en.{client_id,client_secret,refresh_token}
+
+Then map the new keys in shorts-factory/secrets.manifest.yaml (the English
+channel's env names are YOUTUBE_EN_CLIENT_ID / _CLIENT_SECRET / _REFRESH_TOKEN;
+they are deliberately absent until the vault has the values, because
+render_env.py refuses to build any .env while a manifest points at a missing
+vault path), and deploy:
+
     make secrets && ./scripts/deploy.sh -s shorts-factory -y
+
+Sign in as the account that owns the channel you are authorising: Google grants
+the token to whichever channel the consent screen was completed for.
 """
 from __future__ import annotations
 

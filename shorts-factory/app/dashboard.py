@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import analytics, experiment, history, manifest
+from app import analytics, experiment, history, locales, manifest
 
 HERE = Path(__file__).parent
 DATA = Path(os.environ.get("DATA_DIR", "/data"))
@@ -36,6 +36,9 @@ def _row(record: dict) -> dict:
     snapshot = manifest.day7(record) or {}
     return {
         "id": record.get("id", ""),
+        # Which channel this Clip belongs to. Manifests older than Locales
+        # carry no field and are Thai (docs/adr/0008).
+        "locale": locales.get(record.get("locale"))["label"],
         "created_at": record.get("created_at", ""),
         "topic": record.get("topic", ""),
         "variant": record.get("variant"),
@@ -137,19 +140,34 @@ def clip(request: Request, clip_id: str):
 
 @app.get("/experiment", response_class=HTMLResponse)
 def experiments(request: Request):
+    """One section per Locale: two audiences never share a set of counters.
+
+    Thai is always shown — it is the channel that has been running. Another
+    Locale appears once it has Clips of its own, so the page reads exactly as
+    it did until the second channel produces something.
+    """
     records = manifest.load_all()
-    counts = experiment.tally(records)
-    arms = {
-        name: dict(data, median=median(data["percents"]) if data["percents"] else None)
-        for name, data in counts.items()
-    }
+    sections = []
+    for locale in locales.codes():
+        mine = experiment.for_locale(records, locale)
+        if locale != locales.DEFAULT and not mine:
+            continue
+        counts = experiment.tally(mine)
+        sections.append({
+            "locale": locale,
+            "label": locales.get(locale)["label"],
+            "arms": {
+                name: dict(data, median=median(data["percents"]) if data["percents"] else None)
+                for name, data in counts.items()
+            },
+            "clauses": experiment.VARIANTS_BY_LOCALE.get(locale, experiment.VARIANTS),
+            "verdict": experiment.verdict(counts),
+            "categories": experiment.by_category(mine),
+            "gate": analytics.gate_note(locale),
+        })
     return TEMPLATES.TemplateResponse(request, "experiment.html", {
         "factor": experiment.FACTOR,
-        "arms": arms,
-        "clauses": experiment.VARIANTS,
-        "verdict": experiment.verdict(counts),
-        "categories": experiment.by_category(records),
-        "gate": analytics.gate_note(),
+        "sections": sections,
     })
 
 

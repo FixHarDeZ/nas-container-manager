@@ -149,13 +149,18 @@ Locales, but the clause text handed to the model is written in the clip's own
 language rather than translated, so an English clip is not visibly writing
 from a translated Thai instruction.
 
-**Not done yet (batch 2):** a second YouTube channel for English uploads
-(needs its own vault credentials and its own run of
-`scripts/youtube_auth.py`), per-Locale counting in `/experiment`'s Gate
-(today it pools every clip regardless of language), a Locale column on the
-dashboard, and retention/analytics split by channel. See
-[Uploading to YouTube](#uploading-to-youtube) for what that gap means for
-`/en` clips today.
+Every number is read per channel as well. `history.json` records the Locale
+of each upload, and `history.video_ids()` / `recent_titles()` filter on it, so
+the Gate, `/stats`, the snapshots and the prompt's own examples all count one
+audience at a time — thirty clips split across two audiences is not thirty
+data points about either of them (see `docs/adr/0008`). Entries and Manifests
+written before Locales existed carry no field and are read as Thai.
+
+**Not done yet:** the second YouTube channel itself. Nobody has run
+`scripts/youtube_auth.py` for it and the vault holds no `youtube_en.*` keys,
+so English clips render to `/volume1/shorts/en` and are uploaded by hand, and
+there are no English numbers to report at all. The handoff is written out
+under [Uploading to YouTube](#uploading-to-youtube).
 
 ## Pipeline
 
@@ -408,9 +413,14 @@ their medians differ by at least 5 percentage points; below that it says
 *inconclusive*, which is a result and not a failure. The discard rate is a
 signal in its own right — a Variant whose scripts you keep throwing away is
 losing, whatever its retention says. English clips run the same factor with a
-clause written in English (see [Locales](#locales)), but `/experiment` still
-pools every clip's numbers regardless of Locale — splitting the Gate per
-Locale is not done yet.
+clause written in English (see [Locales](#locales)), and each Locale is
+counted on its own: `/experiment` prints one section per channel, and the
+thresholds (10 clips, 300 views, 5 points) are unchanged — each channel
+simply reaches them separately. Thai is always shown; another Locale appears
+once it has Clips of its own, so the report reads exactly as it did until the
+second channel produces something. Categories are split the same way, or the
+Thai `เทค` and the English `tech` would sit in one table as two unrelated
+rows.
 
 ## Uploading to YouTube
 
@@ -445,10 +455,36 @@ that locale anyway. `do_upload()` uses the locale snapshotted at deliver
 time, so the button — once it exists — always uploads through the same
 channel the clip was written for. Category id and privacy are per-Locale
 too (`YOUTUBE_EN_CATEGORY_ID` / `YOUTUBE_EN_PRIVACY`, same defaults `28` and
-`public` as Thai). Until the second channel exists (batch 2, see
-[Locales](#locales)), `/en` clips are not uploaded from the bot at all — copy
-the file from `/volume1/shorts/en` and upload it by hand. `/help` tells the
-human this in Thai.
+`public` as Thai). Until the second channel exists, `/en` clips are not
+uploaded from the bot at all — copy the file from `/volume1/shorts/en` and
+upload it by hand. `/help` tells the human this in Thai.
+
+### Provisioning the second channel
+
+The order matters, because `scripts/render_env.py` refuses to build *any*
+stack's `.env` while a manifest points at a vault path that does not exist —
+adding the env names before the values would break `make secrets` for the
+whole repo, not just this stack. So:
+
+1. In the Google Cloud console, create the project (or reuse one), enable
+   **YouTube Data API v3**, and set the OAuth consent screen to **In
+   production**. Left in "Testing", the refresh token dies after 7 days
+   (`docs/adr/0001`).
+2. Run `python3 scripts/youtube_auth.py <client_id> <client_secret>` **signed
+   in as the account that owns the English channel** — Google issues the token
+   for whichever channel completes the consent screen.
+3. `make edit-vault`, and put the three values under
+   `stacks.shorts_factory.youtube_en.{client_id,client_secret,refresh_token}`.
+   Writing them over `stacks.shorts_factory.youtube.*` silently redirects
+   every Thai upload to the English channel.
+4. Only now add the mappings to `shorts-factory/secrets.manifest.yaml`:
+   `YOUTUBE_EN_CLIENT_ID`, `YOUTUBE_EN_CLIENT_SECRET`,
+   `YOUTUBE_EN_REFRESH_TOKEN`.
+5. `make secrets && ./scripts/deploy.sh -s shorts-factory -y`.
+
+The upload button appears on English clips from the next render, and `/stats`,
+`/experiment` and the daily snapshots start reporting the English channel
+beside the Thai one on their own.
 
 ## Subtitles, history and `/stats`
 
@@ -456,11 +492,21 @@ Each upload gets a caption track tagged for the clip's own Locale — English
 gets `language: en`, Thai gets `th` — built from the same sentence boundaries
 the video is cut on, and the `.srt` is kept beside the mp4.
 
-Uploads are recorded in `/data/history.json`. Recent titles go into the prompt
-so the bot stops repeating itself, and `/stats` reports views and retention per
-clip — sorted by how much of each clip was actually watched, which is the number
-that matters for Shorts. The top performers are fed back in as examples. Both
-only see clips uploaded through the bot.
+Uploads are recorded in `/data/history.json`, each with the Locale it went out
+under. Recent titles go into the prompt so the bot stops repeating itself, and
+`/stats` reports views and retention per clip — sorted by how much of each clip
+was actually watched, which is the number that matters for Shorts. The top
+performers are fed back in as examples. All of it is read per channel: the
+titles a Thai audience watched are not shown to the model writing for a US one,
+and `/stats` prints one report per channel that has credentials, which today is
+the Thai one alone. Everything here only sees clips uploaded through the bot.
+
+The daily snapshot does one Analytics pull per channel, each with that
+channel's own token — a video id belonging to the other channel does not
+error, it simply returns no row, which would read as "not processed yet". A
+channel with no credentials is skipped, and one that fails does not cost the
+other its reading. `/retention` takes the channel from the clip's own
+Manifest, so there is no way to ask the wrong one.
 
 ## Background music
 

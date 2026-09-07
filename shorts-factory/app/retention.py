@@ -19,7 +19,7 @@ from datetime import date, timedelta
 import httpx
 from PIL import Image, ImageDraw
 
-from app import analytics, render, youtube
+from app import analytics, locales, render, youtube
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +60,15 @@ async def _borrow(client: httpx.AsyncClient | None):
         yield own
 
 
-async def fetch(video_id: str, client: httpx.AsyncClient | None = None) -> list[list]:
+async def fetch(video_id: str, client: httpx.AsyncClient | None = None,
+                locale: str = locales.DEFAULT) -> list[list]:
     """Rows of `[ratio, audienceWatchRatio, relativeRetentionPerformance]`.
 
     Takes a client so a caller walking several Clips does not refresh the
     access token once per Clip.
     """
     async with _borrow(client) as session:
-        token = await youtube._access_token(session)
+        token = await youtube._access_token(session, locale)
         reply = await session.get(
             analytics.REPORTS_URL,
             headers={"Authorization": f"Bearer {token}"},
