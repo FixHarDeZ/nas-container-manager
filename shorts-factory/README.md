@@ -56,6 +56,19 @@ goes out alongside the first and whichever answers first wins. It goes to
 and both requests hung together in the same episode, while the smaller model
 wrote the same script in 149s.
 
+One hedge turned out not to be enough. On 2026-09-07 an English script request
+hung, its 240s hedge hung as well, and both were still silent when the 600s
+budget ran out — 360 seconds spent waiting on two requests that were never
+going to answer. What settles it is what happened around them: an unrelated
+call sent at 17:00 answered in 43s, and the identical topic, asked again three
+minutes after the failure, came back in 62s. The stall is per request, not per
+endpoint, so a third request is worth more than more waiting. A second hedge
+now goes out 120s after the first (`HEDGE_AGAIN`), back to the pro model,
+which is the better writer and by then usually healthy. A hedge is skipped
+when less than `HEDGE_MIN_ROOM` (150s) of the budget remains, since the
+fastest healthy answers measured are 30-70s and one fired into the last
+seconds cannot come back.
+
 Streaming was tried and abandoned: reading the same answer as a stream took
 400s against 137s unstreamed. It would have let silence be told from slowness,
 but this endpoint does not go silent — it thinks — so the trade bought nothing

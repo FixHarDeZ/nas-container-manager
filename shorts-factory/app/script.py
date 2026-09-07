@@ -228,6 +228,18 @@ MIN_ATTEMPT = 90.0
 # request goes out alongside the first and whichever answers first wins. A
 # healthy long think (347s) still lands; a hung one is overtaken by its twin.
 HEDGE_AFTER = 240.0
+# ...and again after that, because one hedge is not enough. Measured
+# 2026-09-07 17:04: an English Script request hung, its 240s hedge to the other
+# model hung too, and both were still silent at the 600s deadline — while an
+# unrelated request sent at 17:00 answered in 43s and the very same topic,
+# re-run three minutes later, came back in 62s. So the stall is per request,
+# not per endpoint, and the answer to two stuck requests is a third one rather
+# than six more minutes of waiting on them.
+HEDGE_AGAIN = 120.0
+# A request fired with less time left than this cannot finish: the fastest
+# healthy answers measured are 30-70s and the budget has to cover reading the
+# body too.
+HEDGE_MIN_ROOM = 150.0
 # The twin goes to the *other* model on purpose. Proven the same evening: the
 # same topic hung twice past 600s — including once with an identical hedge
 # alongside it, so both requests were stuck in the same episode — and then
@@ -318,36 +330,48 @@ async def _say(client: AsyncOpenAI, messages: list[dict], temperature: float,
         return content
 
     primary, hedge_to = models or (PRIMARY_MODEL, FALLBACK_MODEL)
+    # When to give up waiting and add another request alongside the ones
+    # already in flight, and who to send it to. The first hedge goes to the
+    # other model — a stall that is really the pool being sick would take a
+    # twin with it — and the one after that goes back to the primary, which is
+    # the better writer and, on the evidence, usually healthy by then.
+    plan = [(HEDGE_AFTER, hedge_to), (HEDGE_AFTER + HEDGE_AGAIN, primary)]
     running = {asyncio.create_task(once(primary))}
     waited = 0.0
-    hedged = False
     try:
         while True:
-            slice_for = min(HEDGE_AFTER, budget) - waited if not hedged else budget - waited
-            if slice_for <= 0:
+            # Wait until the next scheduled hedge, or until the budget runs
+            # out if they have all been fired.
+            horizon = min(plan[0][0], budget) if plan else budget
+            slice_for = horizon - waited
+            if slice_for > 0:
+                started = time.monotonic()
+                done, running = await asyncio.wait(
+                    running, timeout=slice_for, return_when=asyncio.FIRST_COMPLETED
+                )
+                waited += time.monotonic() - started
+                if done:
+                    # Any answer will do; a failed twin is not worth reporting
+                    # when the other one is still running.
+                    for task in done:
+                        if not task.exception():
+                            return task.result()
+                    if not running:
+                        raise next(iter(done)).exception()
+                    continue
+            if not plan or waited >= budget:
                 raise asyncio.TimeoutError
-            started = time.monotonic()
-            done, running = await asyncio.wait(
-                running, timeout=slice_for, return_when=asyncio.FIRST_COMPLETED
-            )
-            waited += time.monotonic() - started
-            if done:
-                # Any answer will do; a failed twin is not worth reporting when
-                # the other one is still running.
-                for task in done:
-                    if not task.exception():
-                        return task.result()
-                if not running:
-                    raise next(iter(done)).exception()
+            _, model = plan.pop(0)
+            if budget - waited < HEDGE_MIN_ROOM:
+                # Not enough left for the new request to come back; waiting out
+                # what is already in flight is the only move left.
+                plan.clear()
                 continue
-            if hedged or waited >= budget:
-                raise asyncio.TimeoutError
             logger.warning(
-                "%s ยังไม่ตอบใน %.0f วินาที ยิงคำขอสำรองไปที่ %s คู่ไปด้วย",
-                primary, waited, hedge_to,
+                "ยังไม่มีใครตอบใน %.0f วินาที (%d คำขอค้างอยู่) ยิงเพิ่มไปที่ %s",
+                waited, len(running), model,
             )
-            running.add(asyncio.create_task(once(hedge_to)))
-            hedged = True
+            running.add(asyncio.create_task(once(model)))
     finally:
         for task in running:
             task.cancel()

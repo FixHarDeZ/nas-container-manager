@@ -114,6 +114,7 @@ def test_a_hung_request_is_overtaken_by_its_twin(monkeypatch):
     request goes out alongside the first and the winner is whoever answers.
     """
     monkeypatch.setattr(script_gen, "HEDGE_AFTER", 0.05)
+    monkeypatch.setattr(script_gen, "HEDGE_MIN_ROOM", 0.01)
     client, calls = hanging_client([30, 0.05])   # first hangs, twin answers
 
     text = asyncio.run(script_gen._say(client, [], 0.8, budget=5))
@@ -126,6 +127,7 @@ def test_a_hung_request_is_overtaken_by_its_twin(monkeypatch):
 def test_a_slow_but_healthy_answer_is_never_thrown_away(monkeypatch):
     """A 347s think has to land — that is the failure that started all this."""
     monkeypatch.setattr(script_gen, "HEDGE_AFTER", 0.05)
+    monkeypatch.setattr(script_gen, "HEDGE_MIN_ROOM", 0.01)
     client, calls = hanging_client([0.2, 30])    # first is slow but arrives
 
     text = asyncio.run(script_gen._say(client, [], 0.8, budget=5))
@@ -2420,3 +2422,32 @@ def test_an_upload_button_without_an_id_still_means_the_last_clip():
              "last_topic": "หัวข้อ", "last_locale": "th", "uploads": {}}
     assert main._to_upload(state, None)["clip"] == "/tmp/a.mp4"
     assert main._to_upload({"uploads": {}}, None) is None
+
+
+def test_two_stuck_requests_get_a_third_rather_than_more_waiting(monkeypatch):
+    """Measured 2026-09-07 17:04: a request hung, its hedge hung too, and both
+    were silent at the 600s deadline — while the same topic answered in 62s
+    when it was simply asked again. One hedge is not enough."""
+    monkeypatch.setattr(script_gen, "HEDGE_AFTER", 0.05)
+    monkeypatch.setattr(script_gen, "HEDGE_AGAIN", 0.05)
+    monkeypatch.setattr(script_gen, "HEDGE_MIN_ROOM", 0.05)
+    client, calls = hanging_client([30, 30, 0.05])   # only the third answers
+
+    text = asyncio.run(script_gen._say(client, [], 0.8, budget=5))
+    assert text == "answer-2"
+    # the first hedge goes to the other model, the second one back to the
+    # better writer
+    assert calls == [script_gen.PRIMARY_MODEL, script_gen.FALLBACK_MODEL,
+                     script_gen.PRIMARY_MODEL]
+
+
+def test_a_hedge_is_not_fired_with_no_time_left_to_answer(monkeypatch):
+    """A request sent into the last seconds of the budget cannot come back;
+    firing it only spends tokens on an answer nobody will read."""
+    monkeypatch.setattr(script_gen, "HEDGE_AFTER", 0.05)
+    monkeypatch.setattr(script_gen, "HEDGE_MIN_ROOM", 30.0)
+    client, calls = hanging_client([30, 30])
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(script_gen._say(client, [], 0.8, budget=0.3))
+    assert calls == [script_gen.PRIMARY_MODEL], "no room, so no hedge at all"

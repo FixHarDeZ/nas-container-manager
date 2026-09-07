@@ -1373,3 +1373,32 @@ each finished Clip in `state["uploads"]` (capped at 10). Buttons sent before
 this still mean "the last clip", which is what they meant when they were sent.
 
 Tests: 179 passing in the container.
+
+## 2026-09-07 — one hedge was not enough
+
+First real `/trends` → English script attempt failed: "mimo ไม่ตอบภายใน 600
+วินาที". The log says exactly what happened. 16:52:39 the request went out;
+16:56:31 the 240s hedge went to `mimo-v2.5`; neither answered by 17:02:31 when
+the shared budget ran out.
+
+Two pieces of evidence say this was not the English prompt and not a sick
+endpoint:
+
+- an unrelated `/trends` call at 17:00:12 — while both script requests were
+  still hanging — answered in 43 seconds;
+- the same topic re-run in the container at 17:04 answered in **62 seconds**
+  (996 tokens, one validation retry because `Same quality, half the cost.` is
+  28 characters against the English cap of 24 — the enforced count doing its
+  job).
+
+So the stall is per request. Waiting on two stuck ones for six minutes is the
+worst use of the budget available. `_say()` now takes a small schedule instead
+of a single `hedged` flag: hedge at `HEDGE_AFTER` (240s) to the other model,
+another at `+HEDGE_AGAIN` (120s) back to the pro, and none at all once less
+than `HEDGE_MIN_ROOM` (150s) of the budget is left, because a request fired
+into the last seconds cannot come back. Whoever answers first still wins and
+the losers are cancelled in the `finally` as before.
+
+Tests: 181 passing. The two existing hedge tests needed `HEDGE_MIN_ROOM`
+monkeypatched down — they run on budgets of a few seconds, where the real
+150s floor would suppress the hedge they are testing.
