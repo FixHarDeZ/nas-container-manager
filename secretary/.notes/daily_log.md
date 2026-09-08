@@ -1,5 +1,29 @@
 # Secretary Stack — Daily Log
 
+## 2026-09-08 — แยก n8n ออกไปเป็น stack ของตัวเอง
+
+n8n ย้ายไป `n8n/` (ดู `../../n8n/.notes/daily_log.md` สำหรับรายละเอียดฝั่งนั้น)
+
+ผลกับ stack นี้:
+- `secretary/docker-compose.yml` ตัด service `n8n` + volume `n8n_data` ออก
+- ลบ `secretary/secrets.manifest.yaml` และ `secretary/.env` — หลังตัด n8n ออก
+  compose ไม่มี `${...}` เหลือแล้ว (ingest/query มี manifest ของตัวเองอยู่)
+- ย้าย `secretary/n8n-workflows/` → `n8n/workflows/`
+- `/volume2/docker/secretary/n8n_data` ย้ายออกไปที่ `/volume2/docker/n8n/n8n_data`
+  (rename ภายใน volume2 = atomic) — project ของ n8n จึงไม่ขึ้นกับโฟลเดอร์นี้แล้ว
+  ตอน cutover ต้อง `down` secretary ก่อนย้าย (**`down` เฉยๆ ห้ามใส่ `-v`**)
+
+**แก้บันทึกเก่า 2026-06-23 ที่ผิด:** entry นั้นสรุปว่า `device:` ใน compose
+"เป็น path ที่ไม่ได้ map จริง" — ไม่จริง. วัดบน NAS วันนี้ (`stat` ผ่าน
+throwaway container mount ทั้งสอง path) ได้ device+inode ตรงกันเป๊ะ
+(`43 35734`) = `/volume2/@docker/volumes/secretary_n8n_data/_data` เป็นแค่จุดที่
+docker เอา bind ไปแปะ ไฟล์ชุดเดียวกับ `/volume2/docker/secretary/n8n_data`
+(นั่นคือเหตุผลที่ `chown` ที่ `_data` ตอนนั้นแก้ปัญหาได้ — มันคือไฟล์เดียวกัน)
+แผน `mv` จึงย้าย data จริง
+- workflow เรียก stack นี้ผ่าน `http://host.docker.internal:5065` แทน
+  `http://secretary-query:5065` แล้ว (คนละ compose network กันแล้ว)
+- ยังไม่ deploy
+
 ## 2026-08-19 (รอบสอง) — แก้ถาวร: /ingest-trigger ใช้ encoder ตัวเดียวกับ query + เพดาน 4 GB
 
 1. **`ingest/ingest.py`:** ย้าย `BGEM3FlagModel("BAAI/bge-m3")` จาก module level ไปเป็น lazy

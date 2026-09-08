@@ -19,34 +19,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  n8n:
-    image: n8nio/n8n:latest
-    container_name: secretary-n8n
-    restart: unless-stopped
-    ports:
-      - "5678:5678"
-    environment:
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
-      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
-      - WEBHOOK_URL=${N8N_WEBHOOK_URL}
-      - GENERIC_TIMEZONE=Asia/Bangkok
-      - TZ=Asia/Bangkok
-      - NODE_OPTIONS=--max-old-space-size=1024
-    volumes:
-      - n8n_data:/home/node/.n8n
-    deploy:
-      resources:
-        limits:
-          memory: 1536M
-        reservations:
-          memory: 256M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   secretary-query:
     build:
       context: ./query
@@ -144,13 +116,6 @@ volumes:
       type: none
       o: bind
       device: /volume2/docker/secretary/qdrant_storage
-
-  n8n_data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /volume2/docker/secretary/n8n_data
 
   ingest_state:
     driver: local

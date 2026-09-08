@@ -2,6 +2,38 @@
 
 ---
 
+## 2026-09-08 (รอบสอง) — homepage-nginx รับ webhook ของ n8n ต่อให้
+
+Telegram รับ webhook เฉพาะพอร์ต 80/88/443/8443 และ router forward แค่ 443
+(กับ 15xxx) ซึ่ง 443 stack นี้ถืออยู่ — nginx ตัวนี้เป็นของเราเองเลยเอามาใช้เป็น
+ทางเข้า webhook ให้ n8n แทนการไปเพิ่ม DSM RP entry (ตอนนั้น DSM UI เข้าไม่ได้)
+
+- `nginx/nginx.conf` เพิ่ม 3 prefix location: `/webhook/`, `/webhook-test/`,
+  `/webhook-waiting/` → `host.docker.internal:5678`
+  **prefix location ชนะ `location /`** เลยไม่ติด basic auth (ตั้งใจ — webhook
+  ต้องให้ Telegram ยิงได้ และ path มี UUID ของ workflow กันอยู่แล้ว
+  n8n เองก็ไม่เคยเอา basic auth ครอบ path พวกนี้)
+- `nginx/n8n_webhook.conf` ไฟล์แยก mount `:ro` — 3 location ใช้ proxy header
+  ชุดเดียวกัน
+- service `nginx` เพิ่ม `extra_hosts: host.docker.internal:host-gateway`
+  (n8n อยู่คนละ compose project ชื่อ container resolve ข้ามไม่ได้)
+- ยืนยัน: `https://<domain>/` ยัง 401 เหมือนเดิม, `/webhook/<id>/webhook`
+  ได้ JSON ของ n8n กลับมา
+
+**coupling ใหม่: homepage ล่ม = บอท n8n ไม่ได้รับข้อความ** ตัดได้ด้วยการ
+forward 8443 ที่ router แล้วให้ n8n มี RP entry ของตัวเอง
+
+## 2026-09-08 — n8n: RP ย้าย + แยกเป็น stack ของตัวเอง
+
+- `stacks.homepage.var_n8n_https` → `https://<domain>:15678` (เดิม
+  `https://n8n.<domain>` บน 443) ตาม DSM reverse proxy ที่ย้ายจาก subdomain
+  มาเป็น port
+- `HOMEPAGE_VAR_N8N_HTTP` (ping) ไม่แตะ — ยังยิงตรง `http://<lan-ip>:5678`
+  ผ่าน LAN ไม่ผ่าน RP
+- `config/services.yaml` description "(Secretary Stack)" → "(shared)" เพราะ n8n
+  แยกออกจาก secretary เป็น stack ของตัวเองแล้ว (ดู `../../n8n/.notes/`)
+- ยังไม่ deploy
+
 ## 2026-07-07 — เพิ่ม ink-reader widget
 
 เพิ่ม ink-reader (Doujin Library, port 5068/15068) เข้า dashboard:

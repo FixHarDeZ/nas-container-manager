@@ -204,8 +204,11 @@ already published.
 
 ## Both languages from one Topic
 
-`/both <topic>`, or the 🌏 row under a `/trends` list, makes the same Topic in
-both Locales. Thai is written first and reviewed exactly as any other clip;
+`/both <topic>`, or the 🌏 row under a Thai `/trends` list, makes the same Topic
+in both Locales. The row only appears on a Thai list: a pair is always written
+Thai first, so offering it under `/trends en` would answer a US search spike
+with a Thai clip. A number button on an English list makes one English clip and
+nothing else. Thai is written first and reviewed exactly as any other clip;
 once its Clip is delivered the bot writes the English half on its own and
 hands it back for review. One at a time rather than both at once — two Scripts
 on screen would have to be read side by side on a phone, and every revision

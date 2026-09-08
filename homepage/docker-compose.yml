@@ -28,9 +28,14 @@ services:
       - "3000:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/n8n_webhook.conf:/etc/nginx/n8n_webhook.conf:ro
       - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
     environment:
       - TZ=Asia/Bangkok
+    # Reaches the n8n stack over the host's published port — n8n lives in its
+    # own compose project, so its container name does not resolve from here.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - homepage
     networks:

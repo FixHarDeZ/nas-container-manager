@@ -36,14 +36,17 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   fails so the other still gets its reading. `retention.fetch(..., locale)`
   takes the channel from the clip's own Manifest, so there is no command
   argument that could name the wrong one.
-- **Locale pairs (2026-09-07).** `/both <topic>` and the 🌏 row under a
+- **Locale pairs (2026-09-07).** `/both <topic>` and the 🌏 row under a Thai
   `/trends` list make the same Topic in both Locales, sequentially: Thai is
   written, reviewed and rendered through the existing path, and `do_render()`
   spawns `continue_pair()` only after the Clip is actually delivered. The
   English half is written natively with the approved Thai Script as context
   (`script._sibling_note()`), never translated — the line budgets and the
   hooks differ. Both Manifests carry `pair_id` (the Thai half's clip id). A
-  failed render or a discarded Script cancels the queued half and says so.
+  failed render or a discarded Script cancels the queued half and says so. The
+  🌏 row is only drawn for `locale == th` (2026-09-08): a pair starts in Thai,
+  so under `/trends en` it turned a US list into a Thai clip. A stale 🌏 tap
+  against an English list is refused rather than starting one.
   Variants are drawn independently per half. Numbered buttons and the
   automatic rounds stay Thai-only.
 - **Upload buttons carry their Clip id** (`upload:<clip_id>`), with the

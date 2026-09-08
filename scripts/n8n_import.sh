@@ -3,31 +3,31 @@
 #
 # Usage: ./scripts/n8n_import.sh [workflow_file.json]
 #
-# Without arguments: imports ALL .json files from secretary/n8n-workflows/
+# Without arguments: imports ALL .json files from n8n/workflows/
 # With argument: imports only the specified file
 #
 # If a workflow with the same name already exists, it will be UPDATED (not duplicated).
 #
 # Requires:
 #   - .env.deploy with NAS_HOST, NAS_USER, NAS_PORT, NAS_SSH_KEY
-#   - secretary/.env with N8N_API_KEY
+#   - n8n/.env with N8N_API_KEY
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${PROJECT_ROOT}/.env.deploy"
 
-N8N_ENV="${PROJECT_ROOT}/secretary/.env"
+N8N_ENV="${PROJECT_ROOT}/n8n/.env"
 N8N_API_KEY=$(grep -E '^N8N_API_KEY=' "${N8N_ENV}" | cut -d'=' -f2- | tr -d '"' | tr -d "'")
 if [[ -z "${N8N_API_KEY}" ]]; then
-  echo "✘ N8N_API_KEY not set in secretary/.env" >&2
+  echo "✘ N8N_API_KEY not set in n8n/.env" >&2
   exit 1
 fi
 
 SSH_KEY="${NAS_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
 SSH_DEST="${NAS_USER}@${NAS_HOST}"
 SSH_PORT="${NAS_PORT:-2222}"
-WORKFLOW_DIR="${PROJECT_ROOT}/secretary/n8n-workflows"
+WORKFLOW_DIR="${PROJECT_ROOT}/n8n/workflows"
 
 # ── Colors ──
 C_RESET='\033[0m'; C_GREEN='\033[0;32m'; C_CYAN='\033[0;36m'; C_RED='\033[0;31m'; C_YELLOW='\033[0;33m'

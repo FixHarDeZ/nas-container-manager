@@ -24,15 +24,17 @@ homepage/
 
 ## Setup
 
-All environment variables are configured in the **root `.env`** (shared by all stacks):
+Environment variables live in `homepage/.env`, which is **generated** — never
+edit it by hand. Values come from the encrypted vault via this stack's
+`secrets.manifest.yaml`:
 
 ```bash
-# From the project root
-cp .env.example .env
-# Fill in the Homepage and LINE sections in .env
+make edit-vault   # change a value (sops decrypts on read, re-encrypts on save)
+make secrets      # regenerate homepage/.env from vault + manifest
+./scripts/deploy.sh
 ```
 
-Then upload to the NAS with `deploy.sh` from the project root.
+See [`../secrets/README.md`](../secrets/README.md) for the full workflow.
 
 ## HTTPS + Authelia SSO
 
@@ -71,10 +73,10 @@ docker exec homepage-nginx nginx -s reload
 
 Credentials are never hardcoded in config files. They flow through two layers:
 
-1. Docker Compose reads variables from root `.env` via `env_file: ../.env` and injects `HOMEPAGE_VAR_*` container env vars directly.
+1. Docker Compose reads variables from the generated `homepage/.env` via `env_file: .env` and injects `HOMEPAGE_VAR_*` container env vars directly.
 2. `services.yaml` references them as `{{HOMEPAGE_VAR_*}}` — Homepage interpolates these at runtime.
 
-### Key `.env` Variables (in root `.env`)
+### Key Variables (in the generated `homepage/.env`)
 
 | Variable | Purpose |
 |---|---|
@@ -82,6 +84,38 @@ Credentials are never hardcoded in config files. They flow through two layers:
 | `HOMEPAGE_VAR_DDNS_BASE_HTTP` | External base for services that don't support HTTPS (e.g. ping checks) |
 | `HOMEPAGE_VAR_DDNS_BASE_HTTPS` | External base for clickable service links (HTTPS via Synology Reverse Proxy) |
 | `HOMEPAGE_ALLOWED_HOSTS` | Comma-separated list of allowed hostnames — must include bare `<NAS_HOST>` (no port) for standard HTTPS access |
+| `HOMEPAGE_VAR_N8N_HTTPS` | Clickable link for the n8n card. **Changed 2026-09-08** — the DSM reverse proxy moved from an `n8n.<NAS_HOST>` subdomain on :443 to `<NAS_HOST>:15678` |
+| `HOMEPAGE_VAR_N8N_HTTP` | Ping target for the n8n card. Stays `http://<NAS_IP>:5678` — LAN-direct, never through the reverse proxy, so the RP change did not touch it |
+
+> Every card that points at a stack carries this HTTP/HTTPS pair: the HTTPS one
+> is the link a browser follows, the HTTP one is the LAN address the ping check
+> hits. Change a stack's reverse proxy entry and only the HTTPS half needs
+> updating — in the vault, not in `.env`.
+
+## n8n Webhook Ingress
+
+This stack's Nginx also fronts n8n's webhook paths. Telegram registers webhooks
+only on ports 80, 88, 443 and 8443, and :443 is the only one forwarded at the
+router — homepage already owns it through the DSM reverse proxy. So instead of
+giving n8n its own entry, three prefix locations here forward to it:
+
+| Path | Destination |
+|---|---|
+| `/webhook/` | `host.docker.internal:5678` |
+| `/webhook-test/` | `host.docker.internal:5678` |
+| `/webhook-waiting/` | `host.docker.internal:5678` |
+
+Prefix locations take precedence over `location /`, so these bypass basic auth —
+deliberately: a webhook has to be callable by Telegram, and the path already
+carries n8n's per-workflow UUID. n8n's own basic auth never covered these paths.
+
+`extra_hosts: host.docker.internal:host-gateway` on the `nginx` service is what
+makes the hop work; n8n runs in a separate compose project, so its container
+name does not resolve from here.
+
+**This couples the two stacks: if homepage is down, the n8n bot stops receiving
+messages.** Forwarding port 8443 at the router would let n8n have its own
+reverse proxy entry and these three locations could be deleted.
 
 ## Configuration
 

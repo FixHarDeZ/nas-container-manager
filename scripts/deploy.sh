@@ -122,7 +122,7 @@ if ! ssh $SSH_OPTS "${SSH_DEST}" "echo OK" &>/dev/null; then
 fi
 ok "Connection OK"
 
-ALL_STACKS=(secretary news-feed torrentwatch homepage jellyfin maid-tracker portainer uptime-kuma watchtower hermes-agent friendly-reminder ink-reader dupe-sweeper ops-bot shorts-factory)
+ALL_STACKS=(secretary n8n news-feed torrentwatch homepage jellyfin maid-tracker portainer uptime-kuma watchtower hermes-agent friendly-reminder ink-reader dupe-sweeper ops-bot shorts-factory)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UPLOAD
@@ -245,7 +245,7 @@ if [[ "$RESTART_ONLY" == false ]]; then
     if [[ -n "${NAS_SUDO_PASSWORD}" ]]; then
       ssh $SSH_OPTS "${SSH_DEST}" \
         "bash -lc \"echo '${NAS_SUDO_PASSWORD}' | sudo -S -p '' chown -R ${NAS_FILE_OWNER}:${NAS_FILE_GROUP} '${NAS_TARGET_PATH}' && \
-         echo '${NAS_SUDO_PASSWORD}' | sudo -S -p '' chown -R 1000:1000 '${NAS_TARGET_PATH}/secretary/n8n_data'\"" </dev/null 2>/dev/null || true
+         echo '${NAS_SUDO_PASSWORD}' | sudo -S -p '' chown -R 1000:1000 '${NAS_TARGET_PATH}/n8n/n8n_data'\"" </dev/null 2>/dev/null || true
     fi
 
     # nginx .htpasswd files must be world-readable (644) so the nginx worker

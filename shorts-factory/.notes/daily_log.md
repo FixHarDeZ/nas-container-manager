@@ -1552,3 +1552,22 @@ Tests: 201 passing in the container. Deployed; `/settings` verified live —
 GET 200, POST 200 and the file written, a bad hour 400 with the stored schedule
 unmoved, and the bot reading the new value back without a restart. nginx basic
 auth answers 401 on both GET and POST for the path.
+
+## 2026-09-08 — `/trends en` no longer offers the 🌏 pair row
+
+An English trends list was drawn with the same two rows as a Thai one, and the
+🌏 row starts a pair — which is always written Thai first. Tapping it under
+`/trends en` therefore answered a US search spike with a Thai clip, then wrote
+the English half afterwards, reading like a translation round trip.
+
+`topics_keyboard()` now takes the list's locale and only appends the 🌏 row for
+`locales.DEFAULT`. `_trends_round()` and `on_cancel()` (which redraws the same
+keyboard) pass it through. `on_pick(pair=True)` refuses a stale 🌏 tap whose
+list is not Thai, since an old message can still be on screen.
+
+Number buttons already carried `suggested_locale`, so an English list has
+always made English clips through them — only the pair row was wrong.
+
+Test: `test_an_english_trends_list_has_no_pair_row`. Suite: 194 passed, 8
+pre-existing font failures on the workstation (no Waree/libraqm; same 8 fail on
+a clean tree).

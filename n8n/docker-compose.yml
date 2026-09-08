@@ -1,0 +1,63 @@
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      # N8N_WEBHOOK_URL, not WEBHOOK_URL — the unprefixed name is deprecated
+      # (n8n 2.x logs "Use N8N_WEBHOOK_URL instead" on every start) and only
+      # sets the production base URL, not the test one.
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL}
+      # Editor and webhooks live on different reverse-proxy entries: the
+      # dashboard is reached at <domain>:15678, but Telegram refuses to
+      # register a webhook on any port other than 80/88/443/8443, so the
+      # webhook base URL has to stay on the :443 subdomain.
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL}
+      - GENERIC_TIMEZONE=Asia/Bangkok
+      - TZ=Asia/Bangkok
+      - NODE_OPTIONS=--max-old-space-size=1024
+      # Two proxies now: the Synology reverse proxy on :443, then homepage's
+      # nginx, which forwards the /webhook/ paths here. Without this,
+      # express-rate-limit
+      # refuses the X-Forwarded-For header (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR)
+      # and keys every request on the proxy's IP, so all callers share one
+      # rate-limit bucket.
+      - N8N_PROXY_HOPS=2
+    # Workflows reach other stacks over the host's published LAN ports
+    # (http://host.docker.internal:5065/query, ...) instead of a shared docker
+    # network. Every stack already publishes its port, so nothing else has to
+    # opt in — a new stack becomes reachable from n8n the moment it is up.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  n8n_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      # Holds the workflows, the credentials, and the encryption key that
+      # decrypts them. Moved here from /volume2/docker/secretary/n8n_data
+      # during the 2026-09-08 stack split (a rename within volume2 — atomic,
+      # no copy). If n8n ever starts against an empty .n8n it generates a NEW
+      # encryption key and every stored credential becomes permanently
+      # undecryptable, so verify the directory is non-empty before starting.
+      device: /volume2/docker/n8n/n8n_data

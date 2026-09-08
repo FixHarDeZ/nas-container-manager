@@ -2495,6 +2495,15 @@ def test_the_trends_list_offers_both_a_thai_and_a_pair_row():
     assert [b["callback_data"] for b in rows[1]] == ["pair:stamp:0", "pair:stamp:1"]
 
 
+def test_an_english_trends_list_has_no_pair_row():
+    """A pair is written Thai first, so 🌏 under `/trends en` would answer a US
+    list with a Thai Clip. Only the numbers, and they make English Clips."""
+    keyboard = main.topics_keyboard([{"topic": "a"}, {"topic": "b"}], "stamp", "en")
+    assert len(keyboard["inline_keyboard"]) == 1
+    assert [b["callback_data"] for b in keyboard["inline_keyboard"][0]] == [
+        "pick:stamp:0", "pick:stamp:1"]
+
+
 def test_a_pair_button_credits_the_same_list_a_number_button_does():
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
     state = {"suggested": [{"topic": "หนึ่ง"}, {"topic": "สอง"}], "suggested_at": stamp}

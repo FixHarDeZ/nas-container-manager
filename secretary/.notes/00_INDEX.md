@@ -1,7 +1,7 @@
 # Secretary Stack — Index
 
 ## Stack Overview
-Personal knowledge base stack: ingests Notion pages into Qdrant, serves RAG queries via FastAPI, orchestrated with n8n Telegram bot workflows.
+Personal knowledge base stack: ingests Notion pages into Qdrant, serves RAG queries via FastAPI, orchestrated with n8n Telegram bot workflows (n8n แยกเป็น stack ของตัวเองแล้วตั้งแต่ 2026-09-08 — ดู `../../n8n/.notes/00_INDEX.md`).
 
 ## Architecture
 ```
@@ -11,14 +11,14 @@ Qdrant (secretary_notes collection)
     ↑ (hybrid search: BGE-M3 dense 1024d + sparse)
 secretary-query (FastAPI :5065)
     ↑ (POST /query, POST /ingest-trigger)
-n8n (:15678) → Telegram bot
+n8n (stack แยก, :15678) → Telegram bot
+    ยิงผ่าน http://host.docker.internal:5065 ไม่ใช่ชื่อ DNS ใน compose network
 ```
 
 ## Services
 | Service | Container | Port | RAM / OMP | Notes |
 |---|---|---|---|---|
 | qdrant | secretary-qdrant | 6333 (internal) | 1.5G | Collection: `secretary_notes`, named vectors `dense`+`sparse` |
-| n8n | secretary-n8n | 15678→5678 | 1.5G | Webhook: `/webhook/telegram`. Basic auth via root `.env`. `NODE_OPTIONS=--max-old-space-size=1024` |
 | secretary-query | secretary-query | 15065→5065 | 6G / OMP=2 | FastAPI RAG. LLM provider switchable via `LLM_PROVIDER` env. **`/ingest-trigger` spawns ingest.py subprocess inside this container** — needed 6G headroom because subprocess loads its own BGE-M3 on top of parent's resident BGE-M3 (see below) |
 | secretary-ingest | secretary-ingest | — | 6G / OMP=3 | `restart: "no"`. Run: `docker compose run --rm secretary-ingest`. **Use this path for table-heavy re-ingests** |
 
@@ -39,12 +39,11 @@ n8n (:15678) → Telegram bot
 | Volume | Path |
 |---|---|
 | qdrant_storage | `/volume2/docker/secretary/qdrant_storage` |
-| n8n_data | `/volume2/docker/secretary/n8n_data` |
 | ingest_state | `/volume2/docker/secretary/ingest_state` |
 | hf_cache | `/volume2/docker/secretary/hf_cache` |
 
 ## Env Files
-- `secretary/.env` — n8n credentials (`N8N_BASIC_AUTH_*`, `N8N_WEBHOOK_URL`)
+- `secretary/.env` — **ไม่มีแล้ว** ย้ายไป `n8n/.env` พร้อม stack n8n (stack root ไม่มี manifest แล้ว, ingest/query มีของตัวเอง)
 - `secretary/ingest/.env` — Notion token, Qdrant URL, source config
 - `secretary/query/.env` — Qdrant URL, LLM provider keys, Cohere key
 
@@ -100,7 +99,7 @@ The `POST /ingest-trigger` endpoint in `secretary-query` runs `ingest.py` as a s
 ## n8n Workflow Backup
 Manual scripts to export/import n8n workflows via REST API (SSH tunnel to NAS localhost:5678).
 
-**Export:** `./scripts/n8n_export.sh` → saves workflow JSONs to `secretary/n8n-workflows/`
+**Export:** `./scripts/n8n_export.sh` → saves workflow JSONs to `n8n/workflows/`
 **Import:** `./scripts/n8n_import.sh [file.json]` → updates existing workflows by name (upsert)
 
 Requires `N8N_API_KEY` in `secretary/.env` (generated from vault via `make secrets`).

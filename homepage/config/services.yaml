@@ -115,7 +115,7 @@
     - n8n:
         icon: n8n.png
         href: "{{HOMEPAGE_VAR_N8N_HTTPS}}"
-        description: Workflow Automation (Secretary Stack)
+        description: Workflow Automation (shared)
         ping: "{{HOMEPAGE_VAR_N8N_HTTP}}"
 
     - Maid Tracker:

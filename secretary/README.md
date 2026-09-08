@@ -2,7 +2,7 @@
 
 ![Kim Secretary Telegram Bot](../screenshots/secretary.png)
 
-Personal knowledge base stack. Ingests Notion pages into Qdrant and serves RAG queries via FastAPI, orchestrated with n8n Telegram bot workflows.
+Personal knowledge base stack. Ingests Notion pages into Qdrant and serves RAG queries via FastAPI, orchestrated with n8n Telegram bot workflows (n8n is its own stack — see [`../n8n/README.md`](../n8n/README.md)).
 
 ## Architecture
 
@@ -13,7 +13,7 @@ Qdrant (secretary_notes collection, hybrid BGE-M3)
     ↑
 secretary-query (FastAPI :5065)
     ↑
-n8n (:5678) → Telegram bot
+n8n (../n8n stack, :5678) → Telegram bot
 ```
 
 ## Services
@@ -21,7 +21,6 @@ n8n (:5678) → Telegram bot
 | Service | Container | Port (host→container) | RAM limit | OMP threads | Notes |
 |---|---|---|---|---|---|
 | qdrant | secretary-qdrant | 6333→6333 | 1.5G | — | Collection: `secretary_notes`, named vectors `dense`+`sparse` |
-| n8n | secretary-n8n | 5678→5678 | 1G | — | Telegram webhook at `/webhook/telegram`. External via Synology RP :15678 |
 | secretary-query | secretary-query | 5065→5065 | 4G | 2 | FastAPI RAG. LLM provider switchable via `LLM_PROVIDER` env. External via Synology RP :15065 |
 | secretary-ingest | secretary-ingest | — | 4G | 3 | `restart: "no"`. Run once manually (see below) |
 
@@ -31,13 +30,12 @@ n8n (:5678) → Telegram bot
 
 ```bash
 # 1. Copy env templates
-cp secretary/.env.example secretary/.env
 cp secretary/ingest/.env.example secretary/ingest/.env
 cp secretary/query/.env.example secretary/query/.env
 # Fill in real values in each .env
 
 # 2. Start persistent services
-docker compose up -d qdrant n8n secretary-query
+docker compose up -d qdrant secretary-query
 
 # 3. First ingest (downloads BGE-M3 ~2GB on first run)
 docker compose run --rm secretary-ingest
@@ -53,17 +51,17 @@ curl -X POST http://localhost:5065/query \
 | Volume | NAS path |
 |---|---|
 | qdrant_storage | `/volume2/docker/secretary/qdrant_storage` |
-| ollama_data | `/volume2/docker/secretary/ollama_data` |
-| n8n_data | `/volume2/docker/secretary/n8n_data` |
 | ingest_state | `/volume2/docker/secretary/ingest_state` |
 | hf_cache | `/volume2/docker/secretary/hf_cache` |
 | query-data | `/volume2/docker/secretary/query-data` (bind, not named volume) |
 
 ## Env Files
 
+This stack has no root-level `.env` or `secrets.manifest.yaml` — the only one
+was n8n's, and it left with the n8n stack. The two sub-services carry their own.
+
 | File | Used by | Key variables |
 |---|---|---|
-| `secretary/.env` | n8n | `N8N_BASIC_AUTH_USER/PASSWORD`, `N8N_WEBHOOK_URL` |
 | `secretary/ingest/.env` | secretary-ingest, /ingest-trigger | `NOTION_TOKEN`, `QDRANT_URL`, `NOTION_SOURCE_TYPE` |
 | `secretary/query/.env` | secretary-query | `LLM_PROVIDER`, `ANTHROPIC_API_KEY`, `COHERE_API_KEY` |
 
@@ -115,19 +113,14 @@ only one batch of activations is resident at a time; the container is capped at 
 
 First run downloads ~2GB to `hf_cache` volume shared between ingest and query containers.
 
-## n8n Workflow Backup
+## n8n
 
-Export and import n8n workflows via REST API (requires `N8N_API_KEY` in `secretary/.env`).
+n8n runs as its own stack — see [`../n8n/README.md`](../n8n/README.md). Its
+workflows call this stack over the host's published port
+(`http://host.docker.internal:5065/query`), not over a shared docker network: a
+docker DNS name like `secretary-query` only resolves inside this stack's own
+compose network.
 
-```bash
-# Export all workflows to JSON files in secretary/n8n-workflows/
-./scripts/n8n_export.sh
-
-# Import all workflows back into n8n (upsert by name)
-./scripts/n8n_import.sh
-
-# Import a specific workflow file
-./scripts/n8n_import.sh secretary/n8n-workflows/Secretary_Bot__syPPm4qxmVNENC9U.json
-```
-
-Workflow JSON files are git-tracked for version control.
+Its data volume still lived under `/volume2/docker/secretary/` until the
+2026-09-08 split and now sits at `/volume2/docker/n8n/n8n_data`, so deleting and
+recreating this stack's DSM project no longer puts n8n's credentials at risk.

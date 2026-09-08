@@ -160,7 +160,8 @@ HELP = """🎬 shorts-factory
    ทำไทยก่อน รีวิว/แก้/กด render ตามปกติ พอคลิปไทยเสร็จบอทเขียนอังกฤษต่อเอง
    แล้วให้รีวิวอีกรอบ — **คนละสคริปต์ ไม่ใช่คำแปล** (บรรทัดอังกฤษสั้นกว่า มุก hook คนละแบบ)
    แต่ส่งสคริปต์ไทยที่อนุมัติแล้วเข้าไปเป็นตัวอย่าง ให้เล่ามุมเดียวกัน
-   ในลิสต์ /trends กดปุ่มแถวล่าง 🌏1 🌏2 ... ได้เหมือนกัน (แถวบน = ไทยอย่างเดียวเหมือนเดิม)
+   ในลิสต์ /trends ไทย กดปุ่มแถวล่าง 🌏1 🌏2 ... ได้เหมือนกัน
+   ลิสต์ /trends en ไม่มีแถว 🌏 — ปุ่มเลขทำคลิปอังกฤษอย่างเดียว
    คลิปไทย render ไม่ผ่าน หรือกด 🗑 ทิ้ง = ยกเลิกอังกฤษด้วย
    อัปขึ้น YouTube ยังกดเอง ปุ่มแยกกันคนละคลิป คนละช่อง
 
@@ -1181,7 +1182,7 @@ async def _trends_round(client: httpx.AsyncClient, state: dict, auto: bool,
     # from; without this, an 💡 button on a US list would write in Thai.
     state["suggested_locale"] = locale
     state["suggested_at"] = datetime.now().isoformat(timespec="seconds")
-    keyboard = topics_keyboard(topics, state["suggested_at"])
+    keyboard = topics_keyboard(topics, state["suggested_at"], locale)
     if auto:
         # Per Locale, from the dashboard's schedule: a channel nobody watches
         # closely can be given longer to be rescued than one that is.
@@ -1217,20 +1218,24 @@ async def auto_pick(client: httpx.AsyncClient, state: dict) -> None:
                       locale=state.get("suggested_locale", locales.DEFAULT))
 
 
-def topics_keyboard(topics: list[dict], stamp: str) -> dict:
+def topics_keyboard(topics: list[dict], stamp: str,
+                    locale: str = locales.DEFAULT) -> dict:
     """One button per suggestion, each carrying the list it belongs to.
 
-    Two rows: the numbers make one Clip in Thai, the 🌏 row makes the same
-    Topic in both Locales. Deliberately not the default — a Thai search spike
-    is often about something a US audience has no reason to care about, and a
-    pair costs two Scripts and two renders.
+    The numbers make one Clip in the Locale the list was read for. The 🌏 row
+    makes the same Topic in both Locales, and only appears on a Thai list: a
+    pair is always written Thai first, so offering it under `/trends en` would
+    answer a US search spike with a Thai Clip nobody asked for. Deliberately
+    not the default either — a Thai spike is often about something a US
+    audience has no reason to care about, and a pair costs two Scripts and two
+    renders.
     """
-    return {"inline_keyboard": [
-        [{"text": str(i), "callback_data": f"{PICK_CB}:{stamp}:{i - 1}"}
-         for i in range(1, len(topics) + 1)],
-        [{"text": f"🌏{i}", "callback_data": f"{PAIR_CB}:{stamp}:{i - 1}"}
-         for i in range(1, len(topics) + 1)],
-    ]}
+    rows = [[{"text": str(i), "callback_data": f"{PICK_CB}:{stamp}:{i - 1}"}
+             for i in range(1, len(topics) + 1)]]
+    if locale == locales.DEFAULT:
+        rows.append([{"text": f"🌏{i}", "callback_data": f"{PAIR_CB}:{stamp}:{i - 1}"}
+                     for i in range(1, len(topics) + 1)])
+    return {"inline_keyboard": rows}
 
 
 def picked(state: dict, data: str) -> str | None:
@@ -1540,7 +1545,9 @@ async def on_cancel(client: httpx.AsyncClient, state: dict, stamp: str) -> None:
     # their mind, and editMessageReplyMarkup leaves the list text alone.
     if message_id:
         await api(client, "editMessageReplyMarkup", chat_id=CHAT_ID, message_id=message_id,
-                  reply_markup=topics_keyboard(state.get("suggested") or [], stamp))
+                  reply_markup=topics_keyboard(
+                      state.get("suggested") or [], stamp,
+                      state.get("suggested_locale", locales.DEFAULT)))
     await say(client, "ได้ ไม่ทำรอบนี้" if cancelled else "รอบนี้ยกเลิกไปแล้ว")
 
 
@@ -1593,6 +1600,11 @@ async def on_pick(client: httpx.AsyncClient, state: dict, data: str,
         return
     # Verbatim, so trend_origin matches it and the origin gets recorded.
     if pair:
+        # A 🌏 button from a non-Thai list can only be an old message still on
+        # screen: a pair starts in Thai, which is not what that list asked for.
+        if state.get("suggested_locale", locales.DEFAULT) != locales.DEFAULT:
+            await say(client, "ลิสต์นี้เป็นภาษาอังกฤษ กดปุ่มเลขเพื่อทำคลิปอังกฤษได้เลย")
+            return
         spawn(start_pair(client, state, topic), "start_pair")
         return
     await say(client, f"👍 {topic}")
