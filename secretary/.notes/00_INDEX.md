@@ -138,3 +138,20 @@ peak ระหว่าง ingest 3.70 GB. ถ้าจะกดต่ำกว�
 `ONNX encoder unavailable (NO_SUCHFILE: /models/bge-m3-int8.onnx); falling back to torch`
 เพราะ `RUN python export_onnx.py || echo "WARN..."` ใน `query/Dockerfile` fail แบบเงียบตอน build.
 ผลคือ runtime ใช้ torch/FlagEmbedding ซึ่งกิน RAM มากกว่า ONNX int8 — เป็นตัวเร่งของ OOM ข้างบน.
+
+## Memory Ceiling — secretary-ingest 6G → 4G (2026-09-08)
+`secretary-ingest` **มี `limits.memory` อยู่แล้ว = 6G** (ไม่ใช่ไม่มี limit) แต่เพดานสูงเกินไปบนเครื่อง
+12 GB — container โตได้ถึง 4.08 GB `anon-rss` (total-vm 7.1 GB) โดย cgroup limit ยังไม่ทำงาน
+2026-09-08 14:15:13 มันชนกับ DSM `synofoto-face-extraction` ที่กำลัง index ใบหน้าอยู่พอดี →
+**global OOM ของ host** (`constraint=CONSTRAINT_NONE ... global_oom,
+task_memcg=/docker/ea61abdd49af...`) container โดน kill (Exited 137)
+แพตเทิร์นเดียวกับ `secretary-query` ตอน 19/08 เป๊ะ: เพดาน = ครึ่งเครื่อง แปลว่า host ตายก่อน cgroup
+
+ผลข้างเคียงที่มองไม่ออกจากฝั่ง stack: OOM ระดับ host ลาก `synorelayd` ตายไปด้วย →
+**QuickConnect ใช้ไม่ได้** (`/portal/error.html?error=6`) จน DSM restart daemon เองตอน 14:59
+ทั้ง `docker ps` และ dashboard ยังเขียวหมด ไม่มีอะไรชี้ว่าเป็นเรื่อง memory
+
+แก้แล้ว 2026-09-08: ลดเป็น **4G** เท่ากับ query. **Trade-off ที่รับไว้เอง** — คอมเมนต์เดิมในไฟล์บันทึกว่า
+2026-06-01 เพดาน 4 GB เคย OOM-kill container นี้ตอน ingest หน้า User-Password มาแล้ว (batch 20–50 chunk
+ที่คิด dense + sparse + colbert พร้อมกัน spike เกิน 4 GB) ถ้าโดน kill ซ้ำ **ห้ามดันกลับเป็น 6G**
+ให้ลด batch size ของ `upsert_chunks` แทน — ingest ตายรันใหม่ได้ (`restart: "no"`) host ตายไม่ได้

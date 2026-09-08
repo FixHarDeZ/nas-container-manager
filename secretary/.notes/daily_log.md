@@ -326,3 +326,15 @@ This was the path used to backfill the User-Password page. The standalone contai
 - **Root cause:** Container mount จริงคือ Docker named volume `secretary_n8n_data` → `/volume2/@docker/volumes/secretary_n8n_data/_data` (ไม่ใช่ `/volume2/docker/secretary/n8n_data` ตามที่ compose `device:` ระบุ — path นั้นเป็น dir เก่าที่ไม่ได้ใช้แล้ว). Ownership ของ `_data` กลายเป็นไม่ตรง uid container ทำให้ container user `node` (uid 1000:1000) เขียน config/database ไม่ได้
 - **Fix:** `chown -R 1000:1000 /volume2/@docker/volumes/secretary_n8n_data/_data` แล้ว `docker restart secretary-n8n` → ขึ้นปกติ, RestartCount reset เป็น 0
 - **Note:** `/volume2/docker/secretary/n8n_data` ใน compose `volumes.n8n_data.driver_opts.device` เป็น path ที่ไม่ได้ map จริง (Docker ใช้ named volume ปกติแทน bind mount) — ควรเช็คว่า compose `device:` config ตรงกับ volume name mapping จริงหรือไม่ในรอบ deploy ถัดไป
+
+## 2026-09-08
+
+### Incident: host-wide OOM จาก `secretary-ingest` → QuickConnect ล่ม
+- **อาการที่ผู้ใช้เจอ:** เข้า `https://<QC_ID>.quickconnect.to/` ไม่ได้ เด้งไป `/portal/error.html?error=6` ("การเชื่อมต่อล้มเหลวจากปัญหาเครือข่าย") ทั้งที่ container ทุกตัวดูปกติ
+- **Root cause:** 14:15:13 (+07) เกิด global OOM ของ host — `oom-kill:constraint=CONSTRAINT_NONE ... global_oom, task_memcg=/docker/ea61abdd49af...` = `secretary-ingest` โดน kill ที่ `anon-rss 4,084,552 kB` (total-vm 7.1 GB) ระหว่างที่ DSM `synofoto-face-extraction` กำลังรัน index ใบหน้าอยู่พอดี
+- **ทำไมกระทบ QuickConnect:** OOM ระดับ host ทำให้ `synorelayd` (pid 19268) ตายไปด้วย → relay tunnel ไป `synr-sg4.<ID>.direct.quickconnect.to` หายทั้งตัว. DSM restart daemon เองเป็น pid 24645 เวลา 14:59 (`synorelayd.cpp:2739 daemon stopped` → `2695 daemon started` → `2102 Tunnel ready, add trust proxy`)
+- **สถานะหลัง restart (ตรวจแล้ว):** relay ตอบ `pingpong.cgi` 200 (`{"success":true,...}`) 5/5 ครั้ง, `/webman/login.cgi` ผ่าน relay ตอบ 200, DSM listen 5000/5001 ครบ, container รัน 29 ตัว, `secretary-query`/`secretary-qdrant`/`my-secretary` healthy
+- **`secretary-ingest` Exited (137)** = โดน OOM kill ไม่ใช่ crash loop (service นี้เป็น `restart: "no"` one-shot อยู่แล้ว)
+- **แก้แล้ว:** `secretary-ingest` **มี `limits.memory` อยู่แล้ว = 6G** (ที่รายงานตอนแรกว่า "ไม่มี limit" ผิด) แต่เพดานครึ่งเครื่องบนเครื่อง 12 GB = host ตายก่อน cgroup จะทำงาน — แพตเทิร์นเดียวกับ `secretary-query` ตอน 19/08 → ลดเป็น **4G** เท่ากับ query
+- **Trade-off ที่รับไว้:** คอมเมนต์เดิมในไฟล์บันทึกว่า 2026-06-01 เพดาน 4 GB เคย OOM-kill container นี้มาแล้ว ถ้าเกิดซ้ำให้ลด batch size ของ `upsert_chunks` ห้ามดันกลับ 6G — ingest ตายรันใหม่ได้ host ตายไม่ได้
+- **หมายเหตุ:** ฟิลด์ `"pingpong":"DISCONNECTED"` ใน `get_server_info` ของ QuickConnect ไม่ใช่ตัวบอกอาการ — มันคือผลตรวจเส้น direct (port forward) ซึ่ง router forward แค่ 443 + 15xxx ไม่เคย forward 5001 (`ext_port: 0`) จึงขึ้น DISCONNECTED ทั้งตอนพังและตอนปกติ ให้ดูที่ relay pingpong แทน

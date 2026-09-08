@@ -116,11 +116,21 @@ services:
     deploy:
       resources:
         limits:
-          # 6 GB: BGE-M3 + FlagEmbedding holds ~2 GB resident, but encoding a
-          # batch of 20–50 chunks (dense + sparse + colbert outputs together)
-          # transiently spikes past 4 GB. Confirmed by OOM kill on 2026-06-01
-          # while ingesting the User-Password page at the 4 GB ceiling.
-          memory: 6G
+          # 4 GB, down from 6 on 2026-09-08 — same reasoning as secretary-query
+          # above: on a 12 GB host a 6 GB ceiling is high enough that this
+          # container can exhaust the *host* before its own cgroup limit trips.
+          # It did exactly that on 2026-09-08 14:15, reaching 4.08 GB anon-rss
+          # (7.1 GB total-vm) while DSM's synofoto face indexer was running:
+          # global OOM, and the kernel took synorelayd down with it, so
+          # QuickConnect died (portal error=6) with every container still green.
+          # Trade-off, accepted deliberately: BGE-M3 + FlagEmbedding holds ~2 GB
+          # resident and a 20–50 chunk batch (dense + sparse + colbert together)
+          # can spike past 4 GB — a 4 GB ceiling already OOM-killed this
+          # container once, on 2026-06-01, ingesting the User-Password page.
+          # A killed ingest run is recoverable (restart: "no", just run it
+          # again); a killed host is not. If the kill recurs, shrink the
+          # upsert_chunks batch size rather than raising this back to 6G.
+          memory: 4G
     logging:
       driver: json-file
       options:
