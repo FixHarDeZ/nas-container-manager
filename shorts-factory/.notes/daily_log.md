@@ -1402,3 +1402,153 @@ the losers are cancelled in the `finally` as before.
 Tests: 181 passing. The two existing hedge tests needed `HEDGE_MIN_ROOM`
 monkeypatched down — they run on budgets of a few seconds, where the real
 150s floor would suppress the hedge they are testing.
+
+## 2026-09-08 — /help was too long to send, and hedging never rescued a stall
+
+Three reports, two bugs, one non-bug.
+
+**`/help` had been silent for days.** HELP grew to 4690 characters. Telegram's
+sendMessage caps at 4096 and answers `400 Bad Request: message is too long` —
+it does not truncate, it delivers nothing. `api()` logged the description and
+returned None, so the only symptom was a command that did nothing. Confirmed by
+posting HELP straight at the API from inside the container:
+
+    ERR b'{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}'
+
+`say()` now splits on paragraph breaks via `chunks()` and sends the pieces in
+order. `reply_markup` and the returned `message_id` ride the **last** piece
+only: callers keep one id to edit later, and a keyboard on an earlier piece
+would have text posted underneath it. Two tests hold it — HELP splits and
+rejoins byte-for-byte, and the keyboard lands on the final send.
+
+`parse_mode` is the one kwarg that does *not* go tail-only, and getting that
+wrong would have rebuilt the same bug on the Flow-prompt path: piece one would
+render its `<pre>` as literal angle brackets and piece two would carry an
+unbalanced tag into `400 can't parse entities`, delivering nothing again. Only
+`reply_markup` is popped off for the last send. `send_prompt()` keeps its own
+cap rather than going through `chunks()` — a Flow prompt split across two
+messages is a prompt that generates the wrong frame. Reused the existing
+`TELEGRAM_TEXT_LIMIT` instead of adding a second 4096 next to it.
+
+While in there, deleted the stale line saying English clips could not be
+uploaded from the bot. `YOUTUBE_EN_*` has been in `.env` since e9d026f.
+
+**US trends already worked; nobody could find out.** `/trends en` shipped
+yesterday and `locales["en"]` carries `trends_geo: US` / `trends_region: US`.
+Verified live in the container — 22 rows, all American (`at&t internet
+outages`, `blue jays vs athletics`). The line documenting it lives in HELP,
+which is exactly what could not be sent. Fixing `/help` is the fix. One
+cosmetic bug found: `watching()` hardcoded `"source": "youtube-th"` whatever
+the region, so the US chart's raw rows were labelled Thai. Now
+`f"youtube-{region.lower()}"`; only `format_raw()` reads the field.
+
+**The stall: hedging has never once rescued one.** Counted every hedge in the
+container's log. Two episodes:
+
+- 2026-09-07 19:02 — the hedge fired at 240s, and then the *primary* answered
+  at 268s. A healthy long think that crossed the threshold. A wasted request,
+  not a rescue.
+- 2026-09-08 08:02 — the primary, the 240s hedge to `mimo-v2.5` and the 360s
+  hedge back to the pro were **all three** silent at the 600s deadline. Thirty
+  minutes later an unrelated request answered in 51s.
+
+Yesterday's 17:04 episode is the same shape. That contradicts the comment in
+`script.py` claiming the stall is per request: its counter-example (43s at
+17:00) had *completed before* the window opened. Both episodes look like a
+correlated sick window of a few minutes, so a fourth concurrent request would
+have died with the other three. What actually worked, both times, was asking
+again a few minutes later.
+
+So: `ScriptStalled(ScriptError)` is raised when the budget runs out with nobody
+answering, and `generate()` re-raises the *shape* of the last failure rather
+than flattening everything to `ScriptError`. `make_script()` catches it once,
+says so in the chat, sleeps `STALL_COOLDOWN` (`MIMO_STALL_COOLDOWN_SECONDS`,
+default 180s) and writes again with the same Topic. Once only — past that it is
+not a window. A malformed script gets no second chance: it comes back malformed.
+
+Worst case is now 600 + 180 + 600 ≈ 23 minutes before the bot gives up, against
+10 before. The bot stays responsive throughout (`spawn()`), and the alternative
+was a dead topic.
+
+Existing hedges left alone rather than churned: they cost a spare request, and
+the 268s case shows the 240s threshold sits close to a real long think.
+
+Tests: 184 passing in the container. Deployed and `/help` verified live — two
+sendMessage calls, both 200.
+
+**Open question for the human:** should the three unattended `/trends` rounds
+also run English, or stay Thai-only as ADR'd? Left Thai-only, unasked.
+
+## 2026-09-08 (2) — the trends schedule moves into the dashboard
+
+The automatic `/trends` rounds were `TRENDS_HOURS` and `AUTO_PICK_MINUTES` in
+the environment, read at import, Thai only. Changing an hour meant
+`make edit-vault` → `make secrets` → deploy → restart, for a number that is
+tuned by watching what a channel does. With two channels in two time zones it
+gets tuned twice as often and the two numbers are not the same.
+
+**This amends ADR 0007**, which is why it got an ADR of its own (0009) rather
+than a commit message. 0007 gave the dashboard two independent guards: `/data`
+mounted `:ro`, and `test_no_route_can_write` asserting no route allows anything
+but GET/HEAD. The first is untouched. The second is narrowed to "one route
+writes, and it is this one" — `WRITING_ROUTES` in `tests/test_dashboard.py`
+names `/settings`, so a second writing route is a test failure rather than a
+judgement call in review.
+
+The write cannot reach anything that matters. New volume
+`shorts_factory_config` holding one file, `/config/schedule.json`: `:rw` on the
+dashboard, `:ro` on the bot, because the dashboard owns it and the bot only
+obeys it. Verified on the NAS rather than asserted —
+
+    bot /config read-only: Read-only file system
+    dashboard /data read-only: Read-only file system
+    dashboard /config writable: ok
+
+The dashboard still has no `env_file`, which was 0007's strongest claim: no bot
+token, no refresh token for either channel, in the one process reachable from
+the LAN. Worst case past nginx's basic auth is someone changing what hours a
+trends list posts at, or switching a channel's unattended rounds on. That does
+write and render a clip — but it cannot publish, because uploading is still a
+button in Telegram (ADR 0001).
+
+Considered and dropped: a Telegram command (keeps 0007 whole, but the schedule
+is a table per channel and Telegram is a bad place to edit a table) and a
+dashboard that renders a command to paste into Telegram (keeps the property,
+makes the feature worse than nothing).
+
+`schedule.validate()` treats the form as hostile: hours are integers 0-23, at
+most 12 a day; the wait is 1-240 minutes; the Locale must be one the code
+knows; and a Locale switched **on with no hours** is refused, because that
+reads as "on" in the browser and behaves as "off" in the bot. The whole request
+is rejected rather than half-applied — the half that applied is the half nobody
+checked. Written to a temp name and renamed, since the bot reads the file every
+poll tick. A file that will not parse falls back to defaults with a warning: no
+trends rounds is a smaller failure than a bot that will not start.
+
+Bot side: `auto_slot()` → `auto_slots()` returning `(locale, slot)` pairs.
+`state["last_auto_trends"]` went from a bare string to a Locale→slot map, and
+the old string is read as **Thai's alone** — read as a map it would satisfy
+nothing and Thai would fire twice on the first tick after the upgrade. Tests
+cover that migration, the disabled channel, and both due at once.
+
+One round at a time, from `mode == "idle"` only, marked in
+`state["trends_running"]` for its duration and cleared at startup because a
+`finally` does not run through a kill. Two overlapping rounds would leave one
+`suggested` list in state with the other round's buttons still on screen — a 💡
+button that writes about something the human never saw. Not reachable before;
+reachable now that two Locales can share an hour. The second Locale keeps its
+slot owed and goes out on a later tick.
+
+Defaults per the decision taken in chat: Thai keeps `8,12,17`, English ships
+`enabled: false` with a placeholder 20:00, and English auto rounds render
+unattended exactly like Thai once switched on. A container that has never been
+given a schedule behaves precisely as it did before this existed, with a test
+that says so.
+
+`python-multipart` added — Starlette parses `<form>` bodies through it and
+nothing else, and `request.form()` raises without it.
+
+Tests: 201 passing in the container. Deployed; `/settings` verified live —
+GET 200, POST 200 and the file written, a bad hour 400 with the stored schedule
+unmoved, and the bot reading the new value back without a restart. nginx basic
+auth answers 401 on both GET and POST for the path.

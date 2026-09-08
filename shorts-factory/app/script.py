@@ -205,6 +205,16 @@ class ScriptError(ValueError):
     """The model returned something we cannot render."""
 
 
+class ScriptStalled(ScriptError):
+    """Nobody answered inside the budget — a different failure from a bad reply.
+
+    Worth its own type because the answer to it is different: a malformed
+    script is the model doing its best on this prompt and will come back
+    malformed again, while a stall is the endpoint being sick for a few
+    minutes and the same prompt succeeds afterwards.
+    """
+
+
 # Latency here tracks how much the model decides to think, not the network.
 # Measured on the NAS, same prompt: 93s/3,092 completion tokens, 112s/4,016,
 # 197s/7,010, 207s/5,415, 347s/10,585 — about 30 tokens a second, every time.
@@ -635,7 +645,7 @@ async def generate(
             )
             if last_error is not None:
                 timed_out += f" — รอบก่อนหน้า: {last_error}"
-            last_error = ScriptError(timed_out)
+            last_error = ScriptStalled(timed_out)
             continue
         except ScriptError as exc:
             # _say itself rejected the reply (truncated by finish_reason or
@@ -685,7 +695,9 @@ async def generate(
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": f"สคริปต์ผิดกติกา: {exc} — ส่ง JSON ใหม่ให้ถูกกติกา"},
             ]
-    raise ScriptError(str(last_error))
+    # The shape of the *last* failure decides, so a stall that was retried into
+    # a schema slip is reported as the schema slip and not retried again later.
+    raise type(last_error or ScriptError("ไม่มีคำตอบ"))(str(last_error))
 
 
 async def flow_prompt(topic: str, card: dict) -> str:

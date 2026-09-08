@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}ตั้งเวลา — shorts-factory{% endblock %}
+{% block content %}
+<h1>รอบ /trends อัตโนมัติ</h1>
+
+{% if saved %}<p class="ok">บันทึกแล้ว บอทจะเห็นค่าใหม่ในรอบถัดไป (ไม่ต้อง restart)</p>{% endif %}
+{% if error %}<p class="warn">{{ error }}</p>{% endif %}
+
+<p class="muted">
+  ถึงเวลาแล้วบอทจะดู trend ของช่องนั้นเอง เสนอหัวข้อ 5 อันพร้อมปุ่ม ✋ —
+  ไม่กดอะไรเลยภายในเวลาที่ตั้งไว้ บอทจะสุ่มมา 1 อัน เขียนสคริปต์แล้ว render ให้เอง
+  (อัปขึ้น YouTube ยังต้องกดเองใน Telegram เหมือนเดิม)
+  ทีละช่อง ไม่ยิงพร้อมกัน — ตั้งเวลาชนกันได้ ช่องที่สองจะไปรอบถัดไป
+</p>
+
+<form method="post" action="/settings">
+  <div class="rows">
+  <table>
+    <thead><tr><th>ช่อง</th><th>เปิด</th><th>เวลา (0-23 คั่นด้วยจุลภาค)</th><th>รอคนเลือก (นาที)</th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+    <tr>
+      <th data-label="ช่อง">{{ row.label }} <span class="muted">{{ row.code }}</span></th>
+      <td data-label="เปิด">
+        <input type="checkbox" name="{{ row.code }}_enabled" {% if row.enabled %}checked{% endif %}>
+      </td>
+      <td data-label="เวลา">
+        <input type="text" name="{{ row.code }}_hours" value="{{ row.hours }}"
+               inputmode="numeric" placeholder="8,12,17">
+      </td>
+      <td data-label="รอคนเลือก">
+        <input type="number" name="{{ row.code }}_minutes" value="{{ row.minutes }}"
+               min="{{ min_minutes }}" max="{{ max_minutes }}">
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p><button type="submit">บันทึก</button></p>
+</form>
+
+<h2>รอบล่าสุดที่ยิงไปแล้ว</h2>
+<div class="rows">
+<table>
+  <thead><tr><th>ช่อง</th><th>รอบ</th></tr></thead>
+  <tbody>
+  {% for code, slot in stamps.items() %}
+  <tr><td data-label="ช่อง">{{ code }}</td><td data-label="รอบ">{{ slot }}</td></tr>
+  {% else %}
+  <tr><td class="muted">ยังไม่เคยยิงรอบอัตโนมัติ</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<p class="muted">
+  หน้านี้เป็นที่เดียวใน dashboard ที่เขียนอะไรได้ และเขียนได้แค่ไฟล์ตารางเวลา
+  (<code>/config/schedule.json</code>) — manifest, state และประวัติทั้งหมดยัง mount
+  แบบ read-only เหมือนเดิม ดู docs/adr/0009
+</p>
+{% endblock %}

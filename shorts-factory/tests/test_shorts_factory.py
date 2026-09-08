@@ -292,6 +292,41 @@ def test_help_lists_every_command_the_bot_answers(monkeypatch):
     assert not missing, f"ไม่ได้อธิบายไว้ใน /help: {missing}"
 
 
+def test_a_message_over_telegrams_limit_is_sent_in_pieces():
+    """Over 4096 characters sendMessage answers 400 and delivers nothing.
+
+    That is how /help went silent: it grew to 4690 characters and every
+    invocation logged a 400 nobody was reading.
+    """
+    pieces = main.chunks(main.HELP)
+    assert len(pieces) > 1
+    assert all(len(piece) <= main.TELEGRAM_TEXT_LIMIT for piece in pieces)
+    # Split on paragraph breaks, so nothing is cut mid-sentence and the whole
+    # page still arrives.
+    assert "\n\n".join(pieces) == main.HELP
+
+
+def test_a_keyboard_rides_the_last_piece_only(monkeypatch):
+    """Buttons under anything but the final piece get text posted below them."""
+    sent = []
+
+    async def fake_api(client, method, **payload):
+        sent.append(payload)
+        return {"message_id": len(sent)}
+
+    monkeypatch.setattr(main, "api", fake_api)
+    result = asyncio.run(main.say(None, main.HELP, parse_mode="HTML",
+                                  reply_markup={"inline_keyboard": []}))
+    assert len(sent) > 1
+    assert [bool(payload.get("reply_markup")) for payload in sent[:-1]] == [False] * (len(sent) - 1)
+    assert sent[-1].get("reply_markup") is not None
+    # The caller edits this message later, so it must be the one with buttons.
+    assert result["message_id"] == len(sent)
+    # parse_mode is not tail-only: a piece sent without it renders its markup
+    # as literal text, and the piece after it carries an unbalanced tag.
+    assert all(payload.get("parse_mode") == "HTML" for payload in sent)
+
+
 def test_commands_work_while_a_script_is_waiting_for_review(monkeypatch):
     """Plain text revises the pending Script — a command must not become feedback."""
     called = []
@@ -1007,6 +1042,49 @@ def test_a_revision_keeps_the_variant_it_was_born_with(tmp_path, monkeypatch):
     assert styles == [experiment.VARIANTS["question"]] * 2, "the clause must not be re-rolled"
 
 
+def test_a_stalled_mimo_is_asked_again_after_a_cooldown(monkeypatch, tmp_path):
+    """Every request silent at the deadline is a sick window, not a bad prompt.
+
+    Measured twice (2026-09-07 17:04, 2026-09-08 08:02): primary and both
+    hedges dead at 600s, the same Topic answered in about a minute shortly
+    after. A malformed reply gets no such second chance — that one comes back
+    malformed again.
+    """
+    monkeypatch.setattr(manifest, "DIR", tmp_path / "clips")
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+    monkeypatch.setattr(history, "recent_titles", lambda locale=None: [])
+    monkeypatch.setattr(main, "close_prompt", _nothing)
+    monkeypatch.setattr(main, "say", _nothing)
+    monkeypatch.setattr(main, "STALL_COOLDOWN", 0)
+
+    async def no_winners(limit=3, locale="th"):
+        return []
+
+    monkeypatch.setattr(analytics, "winning_examples", no_winners)
+
+    tries = []
+
+    async def stall_once(topic, **kwargs):
+        tries.append(topic)
+        if len(tries) == 1:
+            raise script_gen.ScriptStalled("mimo ไม่ตอบภายใน 600 วินาที")
+        return a_script()
+
+    monkeypatch.setattr(script_gen, "generate", stall_once)
+    state = {}
+    asyncio.run(main.make_script(None, state, "หัวข้อ"))
+    assert len(tries) == 2 and state["mode"] == "review"
+
+    async def always_bad(topic, **kwargs):
+        tries.append(topic)
+        raise script_gen.ScriptError("สคริปต์ผิดกติกา")
+
+    monkeypatch.setattr(script_gen, "generate", always_bad)
+    tries.clear()
+    asyncio.run(main.make_script(None, {"mode": "idle"}, "หัวข้อ"))
+    assert len(tries) == 1, "a bad reply is not retried — only a stall is"
+
+
 def _arm(percents, views, variant):
     return [
         {"variant": variant, "outcome": "rendered",
@@ -1387,21 +1465,61 @@ def test_a_tapped_topic_keeps_its_trend_origin():
     assert main.trend_origin(state, topic)["from"] == "ทองเปิดบวก 50 บาท"
 
 
-def test_only_the_newest_passed_slot_is_owed():
+def test_only_the_newest_passed_slot_is_owed(monkeypatch):
     """A bot that was down all day comes back and runs /trends once, not three times."""
     import datetime as dt
+    from app import schedule
 
-    hours = main.AUTO_HOURS
-    early = dt.datetime(2026, 8, 28, hours[0] - 1, 0)
-    assert main.auto_slot({}, early) is None
+    monkeypatch.setattr(schedule, "settings", lambda: {
+        "th": {"enabled": True, "hours": [8, 12, 17], "auto_pick_minutes": 15},
+        "en": {"enabled": False, "hours": [20], "auto_pick_minutes": 15},
+    })
+    early = dt.datetime(2026, 8, 28, 7, 0)
+    assert main.auto_slots({}, early) == []
 
     late = dt.datetime(2026, 8, 28, 23, 0)
-    slot = main.auto_slot({}, late)
-    assert slot == f"2026-08-28T{hours[-1]:02d}"
+    assert main.auto_slots({}, late) == [("th", "2026-08-28T17")]
     # stamped: the same tick 30 seconds later must not start a second run
-    assert main.auto_slot({"last_auto_trends": slot}, late) is None
+    assert main.auto_slots({"last_auto_trends": {"th": "2026-08-28T17"}}, late) == []
     # yesterday's stamp does not satisfy today's slot
-    assert main.auto_slot({"last_auto_trends": "2026-08-27T17"}, late) == slot
+    assert main.auto_slots({"last_auto_trends": {"th": "2026-08-27T17"}}, late)
+
+
+def test_a_locale_is_owed_a_round_only_when_it_is_switched_on(monkeypatch):
+    """English publishes to a channel unattended, so it is off until asked for."""
+    import datetime as dt
+    from app import schedule
+
+    monkeypatch.setattr(schedule, "settings", lambda: {
+        "th": {"enabled": True, "hours": [8], "auto_pick_minutes": 15},
+        "en": {"enabled": True, "hours": [8], "auto_pick_minutes": 40},
+    })
+    late = dt.datetime(2026, 8, 28, 9, 0)
+    # Both due at once is allowed to happen; the loop takes one at a time and
+    # the other stays owed. Each carries its own stamp, so one running does not
+    # mark the other as done.
+    assert main.auto_slots({}, late) == [("en", "2026-08-28T08"), ("th", "2026-08-28T08")]
+    owed = main.auto_slots({"last_auto_trends": {"en": "2026-08-28T08"}}, late)
+    assert owed == [("th", "2026-08-28T08")]
+
+
+def test_an_old_bare_stamp_belongs_to_thai_only(monkeypatch):
+    """`last_auto_trends` was one string from when only Thai ran unattended.
+
+    Read as a map it would satisfy nothing and Thai's round would fire twice on
+    the first tick after the upgrade.
+    """
+    import datetime as dt
+    from app import schedule
+
+    monkeypatch.setattr(schedule, "settings", lambda: {
+        "th": {"enabled": True, "hours": [8], "auto_pick_minutes": 15},
+        "en": {"enabled": True, "hours": [8], "auto_pick_minutes": 15},
+    })
+    late = dt.datetime(2026, 8, 28, 9, 0)
+    assert main.auto_slots({"last_auto_trends": "2026-08-28T08"}, late) == [
+        ("en", "2026-08-28T08")
+    ]
 
 
 def test_the_automatic_pick_waits_for_its_deadline():
@@ -2451,3 +2569,95 @@ def test_a_hedge_is_not_fired_with_no_time_left_to_answer(monkeypatch):
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(script_gen._say(client, [], 0.8, budget=0.3))
     assert calls == [script_gen.PRIMARY_MODEL], "no room, so no hedge at all"
+
+
+# --- the trends schedule (docs/adr/0009) -------------------------------------
+
+def _schedule(tmp_path, monkeypatch):
+    import importlib
+    from app import schedule
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    return importlib.reload(schedule)
+
+
+def test_no_stored_schedule_behaves_exactly_as_the_environment_did(tmp_path, monkeypatch):
+    """A container that has never been given a schedule must not change."""
+    monkeypatch.setenv("TRENDS_HOURS", "8,12,17")
+    monkeypatch.setenv("AUTO_PICK_MINUTES", "15")
+    schedule = _schedule(tmp_path, monkeypatch)
+    stored = schedule.settings()
+    assert stored["th"] == {"enabled": True, "hours": [8, 12, 17], "auto_pick_minutes": 15}
+    # English starts off: switching it on publishes to a channel unattended,
+    # which is a decision, not a side effect of deploying.
+    assert stored["en"]["enabled"] is False
+
+
+def test_a_schedule_that_will_not_parse_falls_back_rather_than_killing_the_bot(
+        tmp_path, monkeypatch):
+    schedule = _schedule(tmp_path, monkeypatch)
+    schedule.PATH.write_text("{ not json", encoding="utf-8")
+    assert schedule.settings()["th"]["enabled"] is True
+    # Same for a file that parses but stores nonsense — the file is writable
+    # from a LAN page and the bot must survive whatever ends up in it.
+    schedule.PATH.write_text('{"th": {"hours": [99]}}', encoding="utf-8")
+    assert schedule.settings()["th"]["hours"] != [99]
+
+
+@pytest.mark.parametrize("payload, wrong", [
+    ({"th": {"hours": [24]}}, "0-23"),
+    ({"th": {"hours": ["ห้าโมง"]}}, "ตัวเลข"),
+    ({"th": {"hours": list(range(13))}}, "รอบต่อวัน"),
+    ({"th": {"hours": [8], "auto_pick_minutes": 0}}, "auto_pick_minutes"),
+    ({"th": {"hours": [8], "auto_pick_minutes": 9999}}, "auto_pick_minutes"),
+    ({"th": {"enabled": True, "hours": []}}, "ไม่ได้ตั้งเวลา"),
+    ({"fr": {"hours": [8]}}, "ไม่รู้จักภาษา"),
+    ({"th": "8,12"}, "object"),
+])
+def test_the_schedule_form_is_not_trusted(tmp_path, monkeypatch, payload, wrong):
+    """Untrusted text off a LAN page behind one basic auth. Nothing is coerced."""
+    schedule = _schedule(tmp_path, monkeypatch)
+    with pytest.raises(ValueError) as caught:
+        schedule.validate(payload)
+    assert wrong in str(caught.value)
+
+
+def test_saving_a_schedule_normalises_it(tmp_path, monkeypatch):
+    schedule = _schedule(tmp_path, monkeypatch)
+    stored = schedule.save({"th": {"enabled": "yes", "hours": ["12", 8, 8],
+                                   "auto_pick_minutes": "20"}})
+    assert stored["th"] == {"enabled": True, "hours": [8, 12], "auto_pick_minutes": 20}
+    assert schedule.settings()["th"]["hours"] == [8, 12]
+
+
+def test_two_trends_rounds_never_overlap(monkeypatch):
+    """Two Locales can be scheduled for the same hour.
+
+    Overlapping rounds would leave one `suggested` list in state with the other
+    round's buttons still on screen — a 💡 button that writes about something
+    the human never saw.
+    """
+    said = []
+
+    async def fake_say(client, text, **extra):
+        said.append(text)
+        return {"message_id": 1}
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("a second round must not start")
+
+    monkeypatch.setattr(main, "say", fake_say)
+    monkeypatch.setattr(main, "save_state", lambda state: None)
+    monkeypatch.setattr(main, "_trends_round", boom)
+    asyncio.run(main.on_trends(None, {"trends_running": True}))
+    assert "รอบก่อนอยู่" in said[0]
+
+    # And the flag is cleared even when the round blows up, or every later
+    # round is blocked by a marker nobody can see.
+    async def explode(*args, **kwargs):
+        raise RuntimeError("trend source down")
+
+    monkeypatch.setattr(main, "_trends_round", explode)
+    state = {}
+    with pytest.raises(RuntimeError):
+        asyncio.run(main.on_trends(None, state))
+    assert "trends_running" not in state

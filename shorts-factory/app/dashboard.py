@@ -2,7 +2,9 @@
 
 Runs as its own container from the same image as the bot, with /data mounted
 read-only, and imports the bot's own modules so its figures cannot drift from
-the ones Telegram reports. It defines no route that writes: see docs/adr/0007.
+the ones Telegram reports. It defines exactly one route that writes — the
+trends schedule, on its own volume — and nothing else: see docs/adr/0007 as
+amended by 0009.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import analytics, experiment, history, locales, manifest
+from app import analytics, experiment, history, locales, manifest, schedule
 
 HERE = Path(__file__).parent
 DATA = Path(os.environ.get("DATA_DIR", "/data"))
@@ -213,6 +215,59 @@ def now(request: Request):
         "uploads": list(reversed(history.load()))[:20],
         "gate": analytics.gate_note(),
     })
+
+
+# --- the one writing route (docs/adr/0009) -----------------------------------
+
+def _settings_page(request: Request, stored: dict, saved: bool = False,
+                   error: str = "", status: int = 200):
+    return TEMPLATES.TemplateResponse(request, "settings.html", {
+        "rows": [{
+            "code": code,
+            "label": locales.get(code)["label"],
+            "enabled": spec["enabled"],
+            "hours": ",".join(str(h) for h in spec["hours"]),
+            "minutes": spec["auto_pick_minutes"],
+        } for code, spec in sorted(stored.items())],
+        "stamps": schedule.stamps(_state()),
+        "min_minutes": schedule.MIN_PICK_MINUTES,
+        "max_minutes": schedule.MAX_PICK_MINUTES,
+        "saved": saved,
+        "error": error,
+        "gate": None,
+    }, status_code=status)
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_form(request: Request):
+    return _settings_page(request, schedule.settings())
+
+
+@app.post("/settings", response_class=HTMLResponse)
+async def settings_save(request: Request):
+    """Rewrite `/config/schedule.json`. The only non-GET route in this app.
+
+    Everything the form sends is untrusted text off a LAN page behind one basic
+    auth, so nothing is coerced generously: `schedule.validate()` rejects the
+    whole request rather than storing the half of it that parsed, and the reply
+    is the same page with the message on it.
+    """
+    form = await request.form()
+    payload = {}
+    for code in locales.codes():
+        raw = str(form.get(f"{code}_hours", "")).replace(" ", "")
+        payload[code] = {
+            "enabled": bool(form.get(f"{code}_enabled")),
+            "hours": [h for h in raw.split(",") if h],
+            "auto_pick_minutes": form.get(f"{code}_minutes", "15"),
+        }
+    try:
+        stored = schedule.save(payload)
+    except ValueError as exc:
+        # Show what they typed back, not what is on disk: a rejected form that
+        # redraws itself from storage silently discards the edit.
+        return _settings_page(request, schedule.settings(), error=str(exc), status=400)
+    return _settings_page(request, stored, saved=True)
 
 
 def main() -> None:

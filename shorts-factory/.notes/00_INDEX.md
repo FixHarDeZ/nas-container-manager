@@ -165,9 +165,21 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   = `pick:<suggested_at>:<index>` เทียบ timestamp กันกดปุ่มของลิสต์เก่า). **หัวข้อไม่ล็อก DevOps/AI แล้ว** (ADR 0004 ท้ายไฟล์) —
   `category` เป็นมิติที่บันทึกไว้อ่านแบบสังเกตการณ์ ไม่ใช่ variant ที่สุ่ม.
   **ยังไม่ลง**: recommender (ขั้น 6 รอ Gate)
-- **The bot starts Topics itself (28/08).** `auto_slot()` owes the newest
-  passed hour of `TRENDS_HOURS` (default `8,12,17`, TZ Asia/Bangkok) and the
-  slot is stamped *before* the run spawns — `suggest_topics()` takes minutes and
+- **The bot starts Topics itself (28/08), on a schedule the dashboard edits
+  (08/09).** `auto_slots()` owes the newest passed hour **per Locale** from
+  `/config/schedule.json` — hours, the pick deadline and an on/off switch, one
+  row per channel, written by `POST /settings` (docs/adr/0009) and read fresh
+  every tick so an edit needs no restart. `TRENDS_HOURS`/`AUTO_PICK_MINUTES`
+  are now only the defaults for a container with no stored schedule, and
+  English defaults to **off**. `state["last_auto_trends"]` went from one string
+  to a Locale→slot map; the old bare string is Thai's and nothing else's, or
+  Thai fires twice on the first tick after the upgrade. One round at a time and
+  only from `mode == "idle"`, guarded by `state["trends_running"]` (cleared at
+  startup — a `finally` does not run through a kill): two overlapping rounds
+  leave one `suggested` list in state with the other's buttons on screen, which
+  is now reachable because two Locales can share an hour. The other Locale
+  keeps its slot owed for a later tick. The slot is stamped *before* the run
+  spawns — `suggest_topics()` takes minutes and
   an unstamped slot re-fires on the next 30s tick. The automatic list carries a
   ✋ button (callback `cancel:<suggested_at>`, stamp-checked like the 💡 ones,
   and its branch must stay **above** the `mode != "review"` return in
@@ -222,6 +234,9 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
 | `MIMO_REASONING_EFFORT` | literal `low` | mimo-v2.5-pro is a reasoning model; the default budget doubles latency for no better script |
 | `YOUTUBE_SET_THUMBNAIL` | literal `false` | the Shorts feed ignores custom thumbnails, so it is opt-in |
 | `MIMO_TIMEOUT_SECONDS` | literal `600` | wall-clock deadline per model call — httpx's own timeout is per read and will not fire on a trickling server |
+| `MIMO_STALL_COOLDOWN_SECONDS` | default `180` (unset) | how long `make_script()` waits out a sick window before its one retry |
+| `TRENDS_HOURS` / `AUTO_PICK_MINUTES` | literals | **defaults only** since 08/09 — the live schedule is `/config/schedule.json`, edited in the dashboard |
+| `CONFIG_DIR` | default `/config` | volume `shorts_factory_config`: `:rw` on the dashboard, `:ro` on the bot |
 | `YOUTUBE_*` | `stacks.shorts_factory.youtube.*` | empty until `scripts/youtube_auth.py` is run; no credentials = no upload button |
 
 ## Gotchas
@@ -261,6 +276,24 @@ surface, why Pillow). Those ADRs are binding — read them before changing shape
   only the remainder of the shared deadline, which can be shorter than a pro
   think (measured: 257s left against a 347s worst case). The hedge still goes
   to the *other* model either way.
+- **A stall is a window, and no hedge has ever rescued one.** Counted across
+  the whole container log on 2026-09-08: two hedge episodes, zero rescues. On
+  2026-09-07 19:02 the hedge fired at 240s and then the *primary* answered at
+  268s — a healthy long think, not a save. On 2026-09-08 08:02 the primary and
+  both hedges were all silent at the 600s deadline together, while unrelated
+  requests half an hour either side answered in under a minute. So the answer
+  to a stall is not a fourth concurrent request, which would die with the other
+  three: `generate()` raises `ScriptStalled` (a `ScriptError` subclass) when
+  the budget expires with nobody answering, and `make_script()` waits
+  `STALL_COOLDOWN` and writes the same Topic once more. Exactly once, and only
+  for a stall — a reply that failed `validate()` comes back invalid again.
+- **Anything sent to Telegram goes through `say()`, which chunks it.**
+  sendMessage rejects text over 4096 characters with a 400 and delivers
+  *nothing*; it does not truncate. `/help` crossed the line at 4690 characters
+  and went silent with only a log line to show for it (2026-09-08). `chunks()`
+  splits on paragraph breaks, and `reply_markup` plus the returned
+  `message_id` belong to the last piece — a keyboard on an earlier one gets
+  text posted under it, and callers edit the id they were handed.
 - **`/stats` and prompt priming only know about clips uploaded through the
   bot** (`/data/history.json`). Anything published by hand is invisible to
   them.

@@ -69,6 +69,27 @@ when less than `HEDGE_MIN_ROOM` (150s) of the budget remains, since the
 fastest healthy answers measured are 30-70s and one fired into the last
 seconds cannot come back.
 
+Then the hedges were counted, and none of them had ever rescued anything. Two
+episodes exist in the log. On 2026-09-07 19:02 the hedge fired at 240s and then
+the *primary* answered at 268s — a long think that crossed the threshold, not a
+save. On 2026-09-08 08:02 the primary and both hedges were silent together at
+the deadline, and an unrelated request half an hour later answered in 51s. Read
+again with that in hand, the 2026-09-07 counter-example does not say what it
+was taken to say: the 43s call at 17:00 had *finished* before the window
+opened. Both episodes are a correlated sick window of a few minutes, so a
+fourth concurrent request would have died with the other three.
+
+What worked both times was asking again once the window had passed. `generate()`
+now raises `ScriptStalled` — a `ScriptError` subclass — when the budget expires
+with nobody answering, and `make_script()` catches that one shape, says so in
+the chat, waits `STALL_COOLDOWN` (`MIMO_STALL_COOLDOWN_SECONDS`, default 180s)
+and writes the same topic again. Once only: past that it is not a window. A
+script that came back malformed gets no such retry, because it will come back
+malformed again. The worst case is now about 23 minutes to give up instead of
+10, and the bot answers other commands throughout. The hedges are left in
+place — they cost one spare request, and the 268s case shows 240s sits close to
+a genuine long think.
+
 Streaming was tried and abandoned: reading the same answer as a stream took
 400s against 137s unstreamed. It would have let silence be told from slowness,
 but this endpoint does not go silent — it thinks — so the trade bought nothing
@@ -81,7 +102,11 @@ one job at a time: a second topic during either is refused rather than queued.
 ## Commands
 
 `/help` prints the lot in Thai, inside the chat, which is where anyone would
-look for it. The others: `/stats` (how published clips did), `/snapshot` (pull
+look for it — in as many messages as it takes, since Telegram refuses anything
+over 4096 characters outright and delivers nothing rather than truncating. That
+is how the help page went silent for days once it grew to 4690 (2026-09-08), so
+every message the bot sends is now chunked on paragraph breaks, with any
+keyboard on the last piece. The others: `/stats` (how published clips did), `/snapshot` (pull
 today's numbers now rather than waiting for the daily run), `/experiment` (the
 running A/B and whether it can be called yet), `/retention` (one clip's curve,
 with the drop-offs named by card), `/trends` (what Thailand is searching for
@@ -201,8 +226,8 @@ each channel collects its own arms.
 The numbered buttons under `/trends` are unchanged and still make one Thai
 clip; pairing is opt-in per Topic, because a Thai search spike is often about
 something a US audience has no reason to care about, and a pair costs two
-Scripts and two renders. The automatic rounds (`TRENDS_HOURS`, the unattended
-pick) stay Thai-only for the same reason.
+Scripts and two renders. The automatic rounds are per channel and configured
+in the dashboard (see below); English ships switched off.
 
 ## Pipeline
 
@@ -409,13 +434,22 @@ randomised.
 
 ### Running itself
 
-The bot also calls `/trends` on its own three times a day — `TRENDS_HOURS`,
-default `8,12,17` in the container's Asia/Bangkok time. That list carries one
-extra button, ✋, and a deadline: leave it alone for `AUTO_PICK_MINUTES`
-(default 15) and the bot picks one of the five suggestions at random, writes
-the script and renders the clip unattended. ✋ calls off that round and leaves
-the numbered buttons pressable, in case you change your mind about a topic but
-not about the schedule.
+The bot also calls `/trends` on its own, on a schedule you set per channel at
+`/settings` in the dashboard: which hours (Asia/Bangkok), how long the list
+waits, and whether that channel runs unattended rounds at all. That list
+carries one extra button, ✋, and a deadline: leave it alone and the bot picks
+one of the five suggestions at random, writes the script and renders the clip
+unattended. ✋ calls off that round and leaves the numbered buttons pressable,
+in case you change your mind about a topic but not about the schedule.
+
+The schedule lives in `/config/schedule.json` on a volume of its own, which the
+dashboard writes and the bot reads `:ro`. It is the only thing in this stack the
+dashboard may write — docs/adr/0009 explains what that costs and what it does
+not. An edit takes effect on the next poll tick; nothing restarts. English
+defaults to off, because switching it on means clips appearing on that channel
+with nobody reviewing them. `TRENDS_HOURS` and `AUTO_PICK_MINUTES` remain the
+defaults for a container that has never been given a schedule, so an untouched
+deployment behaves exactly as it did before this existed.
 
 Nothing about this reaches YouTube. Uploading is still a button under the
 finished clip — outward-facing, irreversible, and the one step ADR 0001 keeps
@@ -578,8 +612,9 @@ make secrets                    # render .env from vault + manifest
 
 | Key | Default | What it does |
 | :--- | :--- | :--- |
-| `TRENDS_HOURS` | `8,12,17` | hours the bot runs `/trends` unasked |
-| `AUTO_PICK_MINUTES` | `15` | how long that list waits before picking itself |
+| `TRENDS_HOURS` | `8,12,17` | Thai's default hours, until a schedule is saved in the dashboard |
+| `AUTO_PICK_MINUTES` | `15` | default wait before the list picks itself, same |
+| `CONFIG_DIR` | `/config` | where `schedule.json` lives; the dashboard's only writable mount |
 | `FLOW_PARK_HOURS` | `24` | how long a clip waits for footage you generate in Flow |
 | `FLOW_PROMPT_TIMEOUT_SECONDS` | `180` | cap on writing one Flow Prompt |
 | `STORYBOARD_TIMEOUT_SECONDS` | `300` | cap on planning one storyboard |

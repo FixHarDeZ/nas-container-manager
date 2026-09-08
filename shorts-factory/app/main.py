@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 
 from app import (analytics, backfill, experiment, history, locales, manifest, render,
+                 schedule,
                  retention, script as script_gen, snapshots, storyboard, trends,
                  youtube)
 
@@ -45,12 +46,10 @@ STORYBOARD_CB = "storyboard"
 PICK_CB = "pick"
 # The ✋ button under an automatic list: `cancel:<suggested_at>`.
 CANCEL_CB = "cancel"
-# Hours the bot goes looking for a Topic on its own, no one having asked.
-AUTO_HOURS = tuple(
-    sorted(int(h) for h in os.environ.get("TRENDS_HOURS", "8,12,17").split(",") if h.strip())
-)
-# How long the human has to pick one, or press ✋, before the bot picks itself.
-AUTO_PICK_MINUTES = int(os.environ.get("AUTO_PICK_MINUTES", "15"))
+# When the bot goes looking for a Topic on its own, and how long the human has
+# to pick one before it picks for them, now live per Locale in app/schedule.py:
+# the dashboard edits them and `TRENDS_HOURS`/`AUTO_PICK_MINUTES` are only the
+# defaults for a container that has never been given a schedule.
 # How far back /retention walks looking for a Clip YouTube has a curve for.
 # ponytail: one Reports call per Clip tried. Skip Clips whose snapshots show
 # too few views to have a curve (observed: 361 yes, 27 no) if this gets slow.
@@ -61,6 +60,11 @@ SUGGESTION_LIFETIME = timedelta(days=2)
 # in Flow takes minutes and the human may be away; a day is generous and still
 # short enough that a forgotten Clip does not block the next one forever.
 PARK_LIFETIME = timedelta(hours=int(os.environ.get("FLOW_PARK_HOURS", "24")))
+# How long to leave mimo alone after every request in flight went silent. Both
+# recorded stalls were over inside four minutes: 62s and 51s answers came back
+# 3 and 20 minutes after the deadline. Seconds, because asyncio.sleep takes
+# seconds and the tests turn it down to nothing.
+STALL_COOLDOWN = float(os.environ.get("MIMO_STALL_COOLDOWN_SECONDS", "180"))
 # Every Locale keeps its finished Clips in its own folder under /output, so
 # nobody has to guess from a filename which channel a file belongs to. Thai
 # stays exactly where it has always been.
@@ -150,7 +154,6 @@ HELP = """🎬 shorts-factory
    สคริปต์ ข้อความบนจอ ซับ และเสียงอ่านเป็นอังกฤษหมด (เสียง en-US-AndrewNeural)
    ไฟล์ลงที่ /volume1/shorts/en แยกจากคลิปไทย
    ตัวหนังสือละตินกว้างกว่าไทยเท่าตัว บรรทัดบนจอเลยสั้นกว่า (24 ตัวอักษร)
-   ยังอัปขึ้น YouTube จากบอทไม่ได้จนกว่าจะตั้งช่องที่สองเสร็จ — ตอนนี้เอาไฟล์ไปอัปเอง
    ปุ่มทุกปุ่มและข้อความของบอทยังเป็นไทยเหมือนเดิม
 
 /both <หัวข้อ> — เรื่องเดียวกัน ทำทั้งไทยและอังกฤษ
@@ -190,9 +193,14 @@ HELP = """🎬 shorts-factory
    (พิมพ์หัวข้อเองก็ยังได้เหมือนเดิม ปุ่มเป็นแค่ทางลัด)
    ข่าวสด การเมือง คดี ผลแข่ง และเรื่องของคนจริง ถูกกรองทิ้ง (บอทจะแต่งข้อมูลมั่ว)
    🌱 evergreen = ดูได้อีกนาน · ⚡️ spike = ตายพร้อมกระแส
-   บอทสั่ง /trends เองวันละ 3 รอบ (ตั้งไว้ที่ TRENDS_HOURS) — รอบอัตโนมัติจะมีปุ่ม ✋
-   ไม่กดอะไรเลยภายใน AUTO_PICK_MINUTES นาที = บอทสุ่มหัวข้อมา 1 อัน เขียนสคริปต์แล้ว
+   บอทสั่ง /trends เองตามเวลาที่ตั้งไว้ — รอบอัตโนมัติจะมีปุ่ม ✋
+   ไม่กดอะไรเลยภายในเวลาที่ตั้งไว้ = บอทสุ่มหัวข้อมา 1 อัน เขียนสคริปต์แล้ว
    render ให้เองเลย (อัปขึ้น YouTube ยังต้องกดปุ่มเองเหมือนเดิม)
+
+รอบอัตโนมัติตั้งเองได้ที่ dashboard http://<NAS>:5071/settings แยกไทย/อังกฤษ
+   เปิด-ปิดต่อช่อง · ตั้งได้หลายเวลา (0-23) · ตั้งเวลารอคนเลือกต่อช่อง
+   แก้แล้วมีผลรอบถัดไปเลย ไม่ต้อง restart · ฝั่งอังกฤษปิดไว้ตั้งแต่ต้น เปิดเองเมื่อพร้อม
+   ยิงทีละช่อง ตั้งเวลาชนกันได้ ช่องที่สองจะไปรอบถัดไป
 
 /help — หน้านี้"""
 
@@ -236,19 +244,19 @@ def save_state(state: dict) -> None:
 
 # --- the unattended run ------------------------------------------------------
 
-def auto_slot(state: dict, now: datetime | None = None) -> str | None:
-    """The /trends slot that is owed, or None. Same shape as snapshots.due().
+def auto_slots(state: dict, now: datetime | None = None) -> list[tuple[str, str]]:
+    """The (locale, slot) trends rounds that are owed. Shaped like snapshots.due().
 
-    Only the newest passed hour is ever owed: a bot that was down all day comes
-    back and runs once, not three times. A restart late in the evening does run
-    the 17:00 slot late — the list is still worth having.
+    Only the newest passed hour is ever owed per Locale: a bot that was down
+    all day comes back and runs each channel once, not once per missed hour. A
+    restart late in the evening does run the 17:00 slot late — the list is
+    still worth having.
+
+    The hours themselves live in `/config/schedule.json`, which the dashboard
+    writes (docs/adr/0009), so this reads them fresh every tick rather than
+    holding what the environment said at import.
     """
-    now = now or datetime.now()
-    passed = [hour for hour in AUTO_HOURS if now.hour >= hour]
-    if not passed:
-        return None
-    slot = f"{now.date().isoformat()}T{max(passed):02d}"
-    return None if state.get("last_auto_trends") == slot else slot
+    return schedule.due(state, now or datetime.now())
 
 
 def auto_pick_due(state: dict, now: datetime | None = None) -> bool:
@@ -295,8 +303,57 @@ async def api(client: httpx.AsyncClient, method: str, **payload):
     return body.get("result")
 
 
+def chunks(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    """`text` cut into pieces Telegram will accept, on blank lines by choice.
+
+    Paragraph breaks first, then single lines: a help page split mid-sentence
+    reads as a bug. A single line longer than the limit is cut where it falls,
+    which nothing here produces.
+    """
+    parts: list[str] = []
+    buffer = ""
+    for block in text.split("\n\n"):
+        joined = f"{buffer}\n\n{block}" if buffer else block
+        if len(joined) <= limit:
+            buffer = joined
+            continue
+        if buffer:
+            parts.append(buffer)
+        buffer = ""
+        for line in block.split("\n"):
+            joined = f"{buffer}\n{line}" if buffer else line
+            if len(joined) <= limit:
+                buffer = joined
+                continue
+            if buffer:
+                parts.append(buffer)
+            buffer = line[:limit]
+    if buffer:
+        parts.append(buffer)
+    return parts or [text[:limit]]
+
+
 async def say(client: httpx.AsyncClient, text: str, **extra):
-    return await api(client, "sendMessage", chat_id=CHAT_ID, text=text, **extra)
+    # Over the limit Telegram answers 400 and delivers nothing at all, so the
+    # message does not arrive truncated — it does not arrive. /help grew past
+    # 4096 characters and went silent for days (2026-09-08). Buttons and the
+    # returned message_id belong to the last piece: the caller tracks one id to
+    # edit later, and a keyboard under anything but the final message would
+    # have text posted below it.
+    # parse_mode is the exception: it belongs on every piece, or piece one
+    # renders its <pre> as literal angle brackets and piece two carries an
+    # unbalanced tag into a 400 — the same "delivers nothing" failure again.
+    # ponytail: splits on paragraph breaks, so a single <pre> block longer than
+    # the limit would still be cut open. Nothing sends one; send_prompt() caps
+    # its own body instead.
+    markup = {key: extra.pop(key) for key in ("reply_markup",) if key in extra}
+    result = None
+    pieces = chunks(text)
+    for index, piece in enumerate(pieces):
+        tail = index == len(pieces) - 1
+        result = await api(client, "sendMessage", chat_id=CHAT_ID, text=piece,
+                           **extra, **(markup if tail else {}))
+    return result
 
 
 async def send_video(client: httpx.AsyncClient, path: Path, caption: str, **extra) -> dict | None:
@@ -541,20 +598,43 @@ async def make_script(client: httpx.AsyncClient, state: dict, topic: str,
     state["mode"] = "writing"
     save_state(state)
     await say(client, "🤔 กำลังเขียนสคริปต์... (ระหว่างนี้ใช้คำสั่งอื่นได้)")
+
+    async def write() -> dict:
+        """One Script, asked for again once if mimo went quiet on everyone.
+
+        A stall is a window, not a property of the request. Both episodes on
+        record — 2026-09-07 17:04 and 2026-09-08 08:02 — had the primary and
+        every hedge alongside it still silent at the 600s deadline, and the
+        same Topic answered in 62s and 51s a few minutes later. No hedge inside
+        the budget has ever rescued one. Sitting out the window and asking
+        again has, both times. Once only: past that it is not a window.
+        """
+        for final in (False, True):
+            try:
+                return await script_gen.generate(
+                    topic,
+                    previous=previous,
+                    feedback=feedback,
+                    # Both lists are read per channel: what a Thai audience
+                    # watched says nothing about a US one, and each Locale
+                    # reaches ADR 0004's Gate on its own count (docs/adr/0008).
+                    avoid=history.recent_titles(locale=locale),
+                    winners=await analytics.winning_examples(locale=locale),
+                    style=state.get("style", ""),
+                    locale=locale,
+                    sibling=sibling,
+                )
+            except script_gen.ScriptStalled:
+                if final:
+                    raise
+                logger.warning("mimo stalled, retrying in %.0fs", STALL_COOLDOWN)
+                await say(client, f"😵 mimo เงียบทั้งยวง — พัก {STALL_COOLDOWN / 60:.0f} นาที "
+                                  "แล้วบอทจะลองเขียนใหม่ให้เอง ไม่ต้องพิมพ์ซ้ำ")
+                await asyncio.sleep(STALL_COOLDOWN)
+        raise AssertionError("unreachable")
+
     try:
-        script = await script_gen.generate(
-            topic,
-            previous=previous,
-            feedback=feedback,
-            # Both lists are read per channel: what a Thai audience watched
-            # says nothing about a US one, and each Locale reaches ADR 0004's
-            # Gate on its own count (docs/adr/0008).
-            avoid=history.recent_titles(locale=locale),
-            winners=await analytics.winning_examples(locale=locale),
-            style=state.get("style", ""),
-            locale=locale,
-            sibling=sibling,
-        )
+        script = await write()
     except Exception as exc:
         logger.exception("generate failed")
         if previous is not None:
@@ -1062,7 +1142,26 @@ async def on_trends(client: httpx.AsyncClient, state: dict, auto: bool = False,
 
     The raw list is sent too: a suggestion that drifted from its source is only
     catchable against the thing it came from.
+
+    Marked as running for the length of it. Two rounds overlapping would leave
+    one `suggested` list in state and buttons from the other still on screen,
+    which is a 💡 button that writes about something the human never saw —
+    reachable since two Locales can be scheduled for the same hour.
     """
+    if state.get("trends_running"):
+        await say(client, "📈 กำลังดู trend รอบก่อนอยู่ รอให้จบก่อนนะ")
+        return
+    state["trends_running"] = True
+    save_state(state)
+    try:
+        await _trends_round(client, state, auto, locale)
+    finally:
+        state.pop("trends_running", None)
+        save_state(state)
+
+
+async def _trends_round(client: httpx.AsyncClient, state: dict, auto: bool,
+                        locale: str) -> None:
     await say(client, "📈 กำลังดู trend...")
     rows = await trends.collect(locale)
     await say(client, trends.format_raw(rows))
@@ -1084,10 +1183,13 @@ async def on_trends(client: httpx.AsyncClient, state: dict, auto: bool = False,
     state["suggested_at"] = datetime.now().isoformat(timespec="seconds")
     keyboard = topics_keyboard(topics, state["suggested_at"])
     if auto:
-        deadline = datetime.now() + timedelta(minutes=AUTO_PICK_MINUTES)
+        # Per Locale, from the dashboard's schedule: a channel nobody watches
+        # closely can be given longer to be rescued than one that is.
+        wait = schedule.settings()[locale]["auto_pick_minutes"]
+        deadline = datetime.now() + timedelta(minutes=wait)
         state["auto_pick"] = {"deadline": deadline.isoformat(timespec="seconds")}
         keyboard["inline_keyboard"].append([{
-            "text": f"✋ ไม่ต้องทำรอบนี้ (ไม่กด = สุ่มทำเองใน {AUTO_PICK_MINUTES} นาที)",
+            "text": f"✋ ไม่ต้องทำรอบนี้ (ไม่กด = สุ่มทำเองใน {wait} นาที)",
             "callback_data": f"{CANCEL_CB}:{state['suggested_at']}",
         }])
     save_state(state)
@@ -1529,6 +1631,10 @@ async def main() -> None:
         # Crashed or restarted mid-job; the workdir is gone either way.
         state.update(mode="idle", script=None, topic=None)
         save_state(state)
+    if state.pop("trends_running", None):
+        # Set for the length of a round and cleared in a `finally` that a kill
+        # does not run. Left behind, it blocks every future round silently.
+        save_state(state)
 
     restored = backfill.run()
     if restored:
@@ -1541,13 +1647,24 @@ async def main() -> None:
             # thread: getUpdates already wakes every 30s. See app/snapshots.py.
             if snapshots.due(state):
                 await take_snapshots(client, state)
-            slot = auto_slot(state)
-            if slot:
+            owed = auto_slots(state)
+            # One round at a time, and only from a standing start. Two rounds
+            # in flight would overwrite each other's `suggested` list and the
+            # 💡 buttons would make a Clip off the wrong one; a round started
+            # while a human is mid-Script would do the same to them. The other
+            # Locale keeps its slot owed and goes out on a later tick — same
+            # rule the unattended pick already follows.
+            if (owed and state.get("mode", "idle") == "idle"
+                    and not state.get("auto_pick") and not state.get("trends_running")):
+                locale, slot = owed[0]
                 # Stamped before the work: suggest_topics() can take minutes and
                 # runs off the loop, so an unstamped slot fires again in 30s.
-                state["last_auto_trends"] = slot
+                stamped = schedule.stamps(state)
+                stamped[locale] = slot
+                state["last_auto_trends"] = stamped
                 save_state(state)
-                spawn(on_trends(client, state, auto=True), "auto_trends")
+                spawn(on_trends(client, state, auto=True, locale=locale),
+                      f"auto_trends:{locale}")
             if parked_expired(state):
                 expired = state.pop("parked", None)
                 save_state(state)

@@ -57,10 +57,19 @@ def data_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def client(data_dir):
+def config_dir(tmp_path, monkeypatch):
+    """The one volume the dashboard may write. Empty: no schedule stored yet."""
+    where = tmp_path / "config"
+    where.mkdir()
+    monkeypatch.setenv("CONFIG_DIR", str(where))
+    return where
+
+
+@pytest.fixture()
+def client(data_dir, config_dir):
     """A client whose modules were imported *after* DATA_DIR was set."""
-    from app import history, manifest
-    for module in (manifest, history):
+    from app import history, manifest, schedule
+    for module in (manifest, history, schedule):
         importlib.reload(module)
     from app import dashboard
     importlib.reload(dashboard)
@@ -73,12 +82,61 @@ def test_healthz(client):
     assert reply.json() == {"ok": True}
 
 
-def test_no_route_can_write(client):
-    """Read-only is a property of the code, not only of the :ro mount."""
+# The single exception docs/adr/0009 grants, named here so adding a second one
+# is a test failure rather than a judgement call.
+WRITING_ROUTES = {"/settings"}
+
+
+def test_only_the_schedule_route_can_write(client):
+    """Read-only is a property of the code, not only of the :ro mount.
+
+    Amended by docs/adr/0009 from "no route writes" to "one route writes, and
+    it is this one". The list above is the whole permission: a new POST
+    anywhere else fails here before anyone has to notice it in review.
+    """
     from app import dashboard
     for route in dashboard.app.routes:
         allowed = getattr(route, "methods", set()) or set()
-        assert allowed <= {"GET", "HEAD"}, f"{route.path} allows {allowed}"
+        if allowed <= {"GET", "HEAD"}:
+            continue
+        assert route.path in WRITING_ROUTES, f"{route.path} allows {allowed}"
+        assert allowed <= {"POST"}, f"{route.path} allows {allowed}"
+
+
+def test_the_writing_route_cannot_reach_data(client, data_dir, config_dir):
+    """It writes to /config and nothing under /data, which is mounted :ro."""
+    from app import schedule
+    before = sorted(p.name for p in data_dir.iterdir())
+    reply = client.post("/settings", data={
+        "th_enabled": "on", "th_hours": "8,12", "th_minutes": "15",
+        "en_hours": "20", "en_minutes": "15",
+    })
+    assert reply.status_code == 200
+    assert (config_dir / "schedule.json").exists()
+    assert sorted(p.name for p in data_dir.iterdir()) == before
+    assert schedule.settings()["th"]["hours"] == [8, 12]
+    assert schedule.settings()["en"]["enabled"] is False
+
+
+def test_a_bad_schedule_is_rejected_whole(client, config_dir):
+    """Half a schedule applied is the half nobody checked."""
+    from app import schedule
+    schedule.save({"th": {"enabled": True, "hours": [8], "auto_pick_minutes": 15}})
+    reply = client.post("/settings", data={
+        "th_enabled": "on", "th_hours": "8,99", "th_minutes": "15",
+        "en_hours": "", "en_minutes": "15",
+    })
+    assert reply.status_code == 400
+    assert "0-23" in reply.text
+    assert schedule.settings()["th"]["hours"] == [8], "the stored schedule must not move"
+
+
+def test_the_settings_page_shows_what_is_stored(client):
+    from app import schedule
+    schedule.save({"en": {"enabled": True, "hours": [21], "auto_pick_minutes": 30}})
+    body = client.get("/settings").text
+    assert 'value="21"' in body
+    assert 'value="30"' in body
 
 
 def test_clips_page_lists_newest_first(client):

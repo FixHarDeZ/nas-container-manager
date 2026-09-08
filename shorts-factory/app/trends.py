@@ -94,7 +94,7 @@ async def watching(client: httpx.AsyncClient, region: str = REGION) -> list[dict
         if not keep(snippet.get("categoryId")):
             continue
         out.append({
-            "source": "youtube-th",
+            "source": f"youtube-{region.lower()}",
             "term": snippet["title"],
             "traffic": int(item["statistics"].get("viewCount", 0)),
             "headline": "",

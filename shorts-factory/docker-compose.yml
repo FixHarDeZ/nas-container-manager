@@ -11,6 +11,9 @@ services:
     volumes:
       - shorts_factory_data:/data
       - /volume1/shorts:/output
+      # Read-only here on purpose: the dashboard owns this file and the bot
+      # only obeys it. See docs/adr/0009.
+      - shorts_factory_config:/config:ro
     # ffmpeg + Pillow are the memory spike here, and this host has already had a
     # whole-box OOM (2026-08-19), so cap memory. No `cpus:` — DSM's kernel has no
     # CFS bandwidth control and the daemon refuses to create the container:
@@ -37,6 +40,9 @@ services:
       - "8000"
     volumes:
       - shorts_factory_data:/data:ro
+      # The one thing this container may write, and all it may write: the
+      # trends schedule. Manifests, state and history stay :ro above.
+      - shorts_factory_config:/config
     mem_limit: 256m
     depends_on:
       - shorts-factory
@@ -58,3 +64,4 @@ services:
 
 volumes:
   shorts_factory_data:
+  shorts_factory_config:
